@@ -22,6 +22,8 @@ interface QaRetryState {
   defectSummary: string | null;
 }
 
+type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
+
 interface AgentState {
   messages: AgentMessage[];
   tasks: Task[];
@@ -30,6 +32,7 @@ interface AgentState {
   runStatus: string | null;
   runProgress: number;
   qaRetryState: QaRetryState | null;
+  connectionStatus: ConnectionStatus;
 
   addMessage: (message: Omit<AgentMessage, 'id'>) => void;
   addMessageFromServer: (message: AgentMessage) => void;
@@ -40,6 +43,7 @@ interface AgentState {
   setRunProgress: (progress: number) => void;
   setQaRetryState: (state: QaRetryState) => void;
   clearQaRetryState: () => void;
+  setConnectionStatus: (status: ConnectionStatus) => void;
   resetToInitial: () => void;
 }
 
@@ -65,6 +69,7 @@ export const useAgentStore = create<AgentState>((set) => ({
   runStatus: null,
   runProgress: 0,
   qaRetryState: null,
+  connectionStatus: 'disconnected' as ConnectionStatus,
 
   // Client-side message creation (fallback when server doesn't provide id/timestamp)
   addMessage: (message) => {
@@ -116,6 +121,8 @@ export const useAgentStore = create<AgentState>((set) => ({
 
   clearQaRetryState: () => set({ qaRetryState: null }),
 
+  setConnectionStatus: (status) => set({ connectionStatus: status }),
+
   resetToInitial: () =>
     set({
       messages: [],
@@ -125,5 +132,6 @@ export const useAgentStore = create<AgentState>((set) => ({
       runStatus: null,
       runProgress: 0,
       qaRetryState: null,
+      connectionStatus: 'disconnected' as ConnectionStatus,
     }),
 }));

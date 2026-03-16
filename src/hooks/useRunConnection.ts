@@ -33,7 +33,7 @@ import type {
   RunStartData,
 } from '../types/runEvents';
 
-const DEFAULT_API_BASE_URL = 'http://localhost:8000';
+const DEFAULT_API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const TERMINAL_EVENT_TYPES = new Set(['run:complete', 'run:error']);
 const SERVER_EVENT_TYPES = new Set<RunSocketServerEvent['type']>([
   'connection:ready',
@@ -145,6 +145,7 @@ export function useRunConnection(): UseRunConnectionReturn {
   const setRunProgress = useAgentStore((state) => state.setRunProgress);
   const setQaRetryState = useAgentStore((state) => state.setQaRetryState);
   const clearQaRetryState = useAgentStore((state) => state.clearQaRetryState);
+  const setConnectionStatus = useAgentStore((state) => state.setConnectionStatus);
   const setFileTree = useFileStore((state) => state.setFileTree);
   const setFileFromServer = useFileStore((state) => state.setFileFromServer);
   const setAIControlMode = useFileStore((state) => state.setAIControlMode);
@@ -409,6 +410,7 @@ export function useRunConnection(): UseRunConnectionReturn {
     }));
 
     socket.onopen = () => {
+      setConnectionStatus('connected');
       setState((current) => ({
         ...current,
         isConnected: true,
@@ -437,6 +439,7 @@ export function useRunConnection(): UseRunConnectionReturn {
     };
 
     socket.onerror = () => {
+      setConnectionStatus('disconnected');
       setState((current) => ({
         ...current,
         error: 'The websocket connection encountered an error.',
@@ -445,6 +448,7 @@ export function useRunConnection(): UseRunConnectionReturn {
 
     socket.onclose = () => {
       socketRef.current = null;
+      setConnectionStatus('disconnected');
 
       setState((current) => ({
         ...current,
@@ -456,6 +460,7 @@ export function useRunConnection(): UseRunConnectionReturn {
         return;
       }
 
+      setConnectionStatus('reconnecting');
       setState((current) => {
         const reconnectAttempt = current.reconnectAttempt + 1;
         const reconnectDelay = Math.min(1000 * 2 ** (reconnectAttempt - 1), 10_000);

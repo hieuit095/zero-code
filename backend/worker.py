@@ -43,15 +43,42 @@ def _signal_handler(*_: object) -> None:
 
 
 async def process_run(run_id: str) -> None:
-    """Execute the orchestration loop for a single run."""
+    """
+    Execute the orchestration loop for a single run.
+
+    SAFETY: Any unhandled exception is caught and the run is marked as FAILED
+    in the database via RunStore, preventing zombie runs.
+    """
     logger.info("Processing run: %s", run_id)
     manager = get_run_manager()
 
     try:
         await manager.execute_run(run_id)
         logger.info("Run %s completed", run_id)
-    except Exception:
+    except Exception as exc:
         logger.exception("Run %s failed with unhandled error", run_id)
+
+        # ── Record FAILED state in DB to prevent zombie runs ─────
+        try:
+            from app.db.database import async_session
+            from app.services.run_store import RunStore
+
+            async with async_session() as session:
+                await RunStore.update_run(
+                    session,
+                    run_id,
+                    status="failed",
+                    phase="failed",
+                    progress=0,
+                )
+            logger.info(
+                "Run %s recorded as FAILED in DB after crash: %s",
+                run_id, type(exc).__name__,
+            )
+        except Exception:
+            logger.exception(
+                "CRITICAL: Failed to record FAILED status for run %s in DB", run_id
+            )
 
 
 async def main() -> None:

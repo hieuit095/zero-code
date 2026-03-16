@@ -1,7 +1,7 @@
 // @ai-module: App Root
-// @ai-role: Application shell. Composes the resizable panel layout with Header, LeftSidebar, and RightWorkspace.
-//           No state lives here — all state is in Zustand stores accessed via hooks inside child components.
-// @ai-dependencies: None (no direct store or hook imports — layout only)
+// @ai-role: Application shell with simple hash-based routing.
+//           Renders the IDE layout by default, or the AdminDashboard for #/admin.
+// @ai-dependencies: None (no direct store or hook imports — layout + routing only)
 
 // [AI-STRICT] DO NOT add global state, context providers, or data fetching to this file.
 //             All state management is Zustand-based and accessed within the relevant leaf components.
@@ -9,12 +9,25 @@
 //             Do not remove autoSaveId props or panel resize behavior will not persist across reloads.
 
 
+import { useEffect, useState, lazy, Suspense } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { Header } from './components/Header';
 import { LeftSidebar } from './components/LeftSidebar';
 import { RightWorkspace } from './components/RightWorkspace';
 
-export default function App() {
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
+
+function useHashRoute() {
+  const [hash, setHash] = useState(window.location.hash);
+  useEffect(() => {
+    const handler = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', handler);
+    return () => window.removeEventListener('hashchange', handler);
+  }, []);
+  return hash;
+}
+
+function IDELayout() {
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-slate-950 text-slate-100">
       <Header />
@@ -38,3 +51,22 @@ export default function App() {
     </div>
   );
 }
+
+export default function App() {
+  const hash = useHashRoute();
+
+  if (hash === '#/admin') {
+    return (
+      <Suspense fallback={
+        <div className="h-screen w-screen flex items-center justify-center bg-slate-950 text-slate-400">
+          Loading dashboard…
+        </div>
+      }>
+        <AdminDashboard />
+      </Suspense>
+    );
+  }
+
+  return <IDELayout />;
+}
+

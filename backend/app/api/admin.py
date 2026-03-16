@@ -107,3 +107,36 @@ async def get_global_metrics() -> dict:
         "totalTasks": total_tasks,
         "completedTasks": completed_tasks,
     }
+
+
+@router.get("/recent-runs")
+async def get_recent_runs(limit: int = 10) -> list[dict]:
+    """Return the most recent runs for the admin dashboard table."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                RunModel.id,
+                RunModel.goal,
+                RunModel.status,
+                RunModel.phase,
+                RunModel.progress,
+                RunModel.created_at,
+                RunModel.updated_at,
+            )
+            .order_by(RunModel.created_at.desc())
+            .limit(min(limit, 50))
+        )
+        rows = result.all()
+
+    return [
+        {
+            "id": r.id,
+            "goal": r.goal[:120] if r.goal else "",
+            "status": r.status,
+            "phase": r.phase,
+            "progress": r.progress,
+            "createdAt": r.created_at.isoformat() if r.created_at else None,
+            "updatedAt": r.updated_at.isoformat() if r.updated_at else None,
+        }
+        for r in rows
+    ]

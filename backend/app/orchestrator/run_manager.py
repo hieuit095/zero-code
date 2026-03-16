@@ -35,6 +35,7 @@ from ..services.run_store import RunStore
 logger = logging.getLogger(__name__)
 
 MAX_QA_RETRIES = 2
+MAX_LEADER_REPLANS = 2
 
 
 # ─── Run States ───────────────────────────────────────────────────────────────
@@ -366,22 +367,105 @@ class RunManager:
                     })
                     all_files_changed.extend(run.get("_last_files", []))
                 else:
-                    # Task failed — mark it and abort
+                    # ── ESCALATION TO LEADER (PROJECT_KNOWLEDGE.md §1) ───
+                    # Task failed after max QA retries. Instead of aborting
+                    # the entire run, escalate back to the Leader so it can
+                    # re-plan or decompose the problem differently.
                     run["tasks"][task_idx]["status"] = "failed"
                     await self._persist_task_status(task.id, "failed")
                     await self._emit(run_id, "task:update", {
                         "taskId": task.id, "status": "failed",
                     })
 
-                    run["status"] = RunState.FAILED
-                    run["phase"] = "failed"
-                    run["finished_at"] = _now_iso()
-                    await self.update_run_status(run_id, RunState.FAILED, "failed", run["progress"])
+                    leader_replans = run.get("_leader_replans", 0)
+                    if leader_replans >= MAX_LEADER_REPLANS:
+                        # Leader has already re-planned too many times — fail
+                        run["status"] = RunState.FAILED
+                        run["phase"] = "failed"
+                        run["finished_at"] = _now_iso()
+                        await self.update_run_status(
+                            run_id, RunState.FAILED, "failed", run["progress"])
+                        await self._emit_run_error(
+                            run_id, "MAX_REPLANS_EXCEEDED",
+                            f"Task '{task.label}' failed and Leader exhausted "
+                            f"{MAX_LEADER_REPLANS} re-plan attempts.",
+                            task.id)
+                        return
 
-                    await self._emit_run_error(run_id, "task_failed",
-                        f"Task '{task.label}' failed after {MAX_QA_RETRIES + 1} attempts.",
-                        task.id)
-                    return
+                    run["_leader_replans"] = leader_replans + 1
+
+                    # ── Transition back to PLANNING ──────────────────────
+                    run["status"] = RunState.PLANNING
+                    run["phase"] = "planning"
+                    await self._emit_run_state(run_id, "running", "planning",
+                        progress=run["progress"])
+
+                    await self._emit_agent_message(run_id, "tech-lead", "Tech Lead",
+                        f"Task '{task.label}' failed after {MAX_QA_RETRIES + 1} "
+                        f"Dev→QA attempts. Re-planning… "
+                        f"(replan {leader_replans + 1}/{MAX_LEADER_REPLANS})")
+
+                    await self._emit_agent_status(run_id, "tech-lead", "thinking",
+                        activity="Re-analyzing failed task for alternative approach")
+
+                    replan_result: LeaderAgentResult = await self._leader_agent.run(
+                        run_id=run_id,
+                        goal=(
+                            f"The following task FAILED after {MAX_QA_RETRIES + 1} "
+                            f"Dev→QA attempts and needs to be re-planned:\n"
+                            f"  Task: {task.label}\n"
+                            f"  Acceptance Criteria: {task.acceptance_criteria}\n\n"
+                            f"Original goal: {goal}\n\n"
+                            f"Please decompose this task differently or provide "
+                            f"an alternative approach."
+                        ),
+                    )
+
+                    if replan_result.status == "error" or not replan_result.tasks:
+                        # Leader could not re-plan — fail the run
+                        await self._emit_agent_message(run_id, "tech-lead", "Tech Lead",
+                            f"Re-plan failed: "
+                            f"{replan_result.error or 'No replacement tasks'}")
+                        run["status"] = RunState.FAILED
+                        run["phase"] = "failed"
+                        run["finished_at"] = _now_iso()
+                        await self.update_run_status(
+                            run_id, RunState.FAILED, "failed", run["progress"])
+                        await self._emit_run_error(
+                            run_id, "REPLAN_FAILED",
+                            f"Leader could not re-plan failed task '{task.label}'.",
+                            task.id)
+                        return
+
+                    # ── Inject re-planned tasks into the remaining work ──
+                    new_tasks: list[AgentTask] = replan_result.tasks
+                    new_task_dicts = [
+                        {"id": t.id, "label": t.label,
+                         "acceptanceCriteria": t.acceptance_criteria,
+                         "status": "pending", "agent": "dev"}
+                        for t in new_tasks
+                    ]
+                    run["tasks"].extend(new_task_dicts)
+                    tasks = list(tasks) + list(new_tasks)
+                    total_tasks = len(tasks)
+
+                    await self._persist_tasks(run_id, new_task_dicts)
+                    await self._emit_agent_message(run_id, "tech-lead", "Tech Lead",
+                        f"Re-plan ready: {len(new_tasks)} replacement tasks.\n"
+                        + "\n".join(f"  • {t.label}" for t in new_tasks))
+                    await self._emit_agent_status(run_id, "tech-lead", "idle")
+
+                    # Emit updated task snapshot
+                    await self._emit(run_id, "task:snapshot", {
+                        "tasks": [
+                            {"id": t["id"], "label": t["label"],
+                             "status": t["status"], "agent": t.get("agent", "dev")}
+                            for t in run["tasks"]
+                        ],
+                    })
+
+                    # The for-loop will naturally continue to the next task_idx,
+                    # picking up the re-planned tasks appended above.
 
             # ══════════════════════════════════════════════════════════
             # STATE: DONE — all tasks completed

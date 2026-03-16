@@ -36,148 +36,230 @@ _GLOBAL_BLOCKLIST: list[re.Pattern] = [
 
     # Privilege escalation
     re.compile(r"\bsudo\s+", re.IGNORECASE),
-    re.compile(r"\bsu\s+-", re.IGNORECASE),
-    re.compile(r"\bchmod\s+777\b", re.IGNORECASE),
+from typing import Literal
 
-    # Crypto miners / downloaders
-    re.compile(r"\bwget\s+.*?\|\s*(ba)?sh", re.IGNORECASE),                # wget | sh
-    re.compile(r"\bcurl\s+.*?\|\s*(ba)?sh", re.IGNORECASE),                # curl | sh
-
-    # Environment exfiltration
-    re.compile(r"\benv\b|\bprintenv\b", re.IGNORECASE),
-    re.compile(r"\bcat\s+.*?\.env\b", re.IGNORECASE),
-    re.compile(r"\bcat\s+/etc/(passwd|shadow)", re.IGNORECASE),
-
-    # Process/system manipulation
-    re.compile(r"\bkill\s+-9\s+1\b", re.IGNORECASE),                       # kill init
-    re.compile(r"\bshutdown\b|\breboot\b", re.IGNORECASE),
-]
-
-
-# ─── QA Role Allowlist (QA can ONLY run these patterns) ──────────────────────
-
-_QA_ALLOWLIST: list[re.Pattern] = [
-    # Python
-    re.compile(r"^python\s+(-m\s+)?(py_compile|pytest|unittest|mypy|ruff|flake8|black\s+--check|pylint)"),
-    re.compile(r"^python\s+-c\s+"),                                          # python -c "..."
-
-    # Node.js / TypeScript
-    re.compile(r"^(npx|npm\s+run|yarn|pnpm)\s+(test|lint|typecheck|tsc|eslint|prettier\s+--check|vitest|jest)"),
-    re.compile(r"^npx\s+tsc\b"),
-    re.compile(r"^node\s+--check\b"),
-
-    # Shell read-only
-    re.compile(r"^(ls|dir|cat|head|tail|wc|find|tree|file|stat|type)\b"),
-    re.compile(r"^(grep|rg|ag|fd)\b"),
-    re.compile(r"^echo\b"),
-
-    # Go
-    re.compile(r"^go\s+(vet|test|build)\b"),
-
-    # Rust
-    re.compile(r"^cargo\s+(check|test|clippy)\b"),
-]
-
-
-# ─── Dev Role Blocklist (Dev-specific restrictions on top of global) ─────────
-
-_DEV_EXTRA_BLOCKLIST: list[re.Pattern] = [
-    # Prevent installing system-level packages
-    re.compile(r"\bapt(-get)?\s+install\b", re.IGNORECASE),
-    re.compile(r"\byum\s+install\b", re.IGNORECASE),
-    re.compile(r"\bbrew\s+install\b", re.IGNORECASE),
-
-    # Prevent SSH / network
-    re.compile(r"\bssh\b", re.IGNORECASE),
-    re.compile(r"\bscp\b", re.IGNORECASE),
-    re.compile(r"\brsync\b", re.IGNORECASE),
-]
-
-
-# ─── Policy Result ────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PolicyResult:
-    """Result of a command safety check."""
-
     allowed: bool
-    command: str
-    reason: str = ""
-    matched_rule: str = ""
+    reason: str
+    matched_rule: str | None = None
 
-    def to_exec_error(self) -> dict[str, Any]:
-        """
-        Return a structured error matching the standard exec tool output format.
-        This ensures agents can reason about the rejection (Rule 3).
-        """
+    def to_exec_error(self) -> dict:
+        """Format rejection as an agent-readable error response."""
         return {
-            "exitCode": 1,
+            "exit_code": 126,
             "stdout": "",
-            "stderr": (
-                f"⛔ SECURITY POLICY VIOLATION\n"
-                f"Command: {self.command}\n"
-                f"Reason: {self.reason}\n"
-                f"Matched Rule: {self.matched_rule}\n"
-                f"This command is not permitted in the sandbox."
-            ),
-            "durationMs": 0,
+            "stderr": f"POLICY BLOCKED: {self.reason} [rule: {self.matched_rule}]",
+            "duration_ms": 0,
+            "via": "policy_block",
         }
 
 
-# ─── Policy Enforcer ─────────────────────────────────────────────────────────
+# ─── Globally Blocked Base Commands ──────────────────────────────────────────
+# These commands are NEVER allowed for any agent role.
+
+_GLOBAL_BLOCKED_COMMANDS: set[str] = {
+    # Network reconnaissance / exploitation
+    "nmap", "nc", "ncat", "netcat", "telnet", "tcpdump", "wireshark",
+    "masscan", "zmap", "sqlmap", "nikto", "dirb", "gobuster",
+    # Privilege escalation
+    "sudo", "su", "doas", "pkexec",
+    # System destruction
+    "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "mkfs.vfat",
+    "fdisk", "parted", "wipefs", "shred",
+    # Dangerous system utilities
+    "reboot", "shutdown", "halt", "poweroff", "init",
+    # Cryptomining / persistence
+    "crontab", "at", "systemctl", "service",
+    # Container escapes
+    "docker", "podman", "nsenter", "unshare", "chroot",
+    # Remote access
+    "ssh", "scp", "rsync", "sftp", "ftp", "wget", "curl",
+}
+
+# ─── Destructive Command Detection ──────────────────────────────────────────
+
+_DESTRUCTIVE_RM_FLAGS = {"-rf", "-fr", "-r", "--recursive"}
+_DANGEROUS_RM_TARGETS = {"/", ".", "..", "*", "~", "/*", "../*", "../../*"}
+
+
+def _is_destructive_rm(tokens: list[str]) -> str | None:
+    """
+    Detect dangerous `rm` invocations by analyzing flags and targets.
+    Returns a reason string if destructive, None if safe.
+    """
+    if not tokens or tokens[0] != "rm":
+        return None
+
+    flags: set[str] = set()
+    targets: list[str] = []
+
+    for token in tokens[1:]:
+        if token.startswith("-"):
+            # Normalize combined flags: -rf -> -r, -f
+            if not token.startswith("--"):
+                for char in token[1:]:
+                    flags.add(f"-{char}")
+            flags.add(token)
+        else:
+            targets.append(token)
+
+    is_recursive = bool(flags & {"-r", "-R", "--recursive"})
+    is_forced = "-f" in flags or "--force" in flags
+
+    # rm -rf with any dangerous target
+    if is_recursive and is_forced:
+        for target in targets:
+            if target in _DANGEROUS_RM_TARGETS or target.startswith("/"):
+                return f"rm with recursive+force on dangerous target '{target}'"
+        # Even without a specific dangerous target, rm -rf is risky
+        if not targets:
+            return "rm with recursive+force and no target specified"
+
+    # rm -r on root-level paths
+    if is_recursive:
+        for target in targets:
+            if target in {"/", ".", "~", "/*"}:
+                return f"rm recursive on dangerous target '{target}'"
+
+    return None
+
+
+def _is_destructive_dd(tokens: list[str]) -> str | None:
+    """Detect dangerous dd commands that overwrite disks."""
+    if not tokens or tokens[0] != "dd":
+        return None
+
+    for token in tokens[1:]:
+        if token.startswith("of="):
+            target = token[3:]
+            if target.startswith("/dev/") or target in {"/", "."}:
+                return f"dd writing to dangerous target '{target}'"
+
+    return "dd command blocked (potential disk destruction)"
+
+
+# ─── QA Allowlist ────────────────────────────────────────────────────────────
+# QA agent can ONLY run these base commands (verification-only).
+
+_QA_ALLOWED_COMMANDS: set[str] = {
+    # Testing
+    "pytest", "python", "python3", "node", "npx", "npm", "yarn", "pnpm",
+    "jest", "vitest", "mocha",
+    # Linting / formatting
+    "ruff", "black", "isort", "flake8", "mypy", "pyright", "pylint",
+    "eslint", "prettier", "tsc",
+    # Build verification
+    "make", "cargo",
+    # Read-only inspection
+    "cat", "head", "tail", "less", "wc", "grep", "find", "ls", "tree",
+    "diff", "echo", "env", "printenv", "which", "whoami", "pwd",
+}
+
+# ─── Dev Extra Blocklist ─────────────────────────────────────────────────────
+# Additional commands blocked specifically for the Dev agent.
+
+_DEV_EXTRA_BLOCKED: set[str] = {
+    "apt", "apt-get", "yum", "dnf", "brew", "pacman", "pip", "pip3",
+    "gem", "cargo", "go",
+}
 
 
 class CommandPolicy:
-    """Enforces command safety policies based on agent role."""
+    """Production-grade command policy using shlex parsing."""
 
     @staticmethod
-    def check(command: str, agent_role: str = "dev") -> PolicyResult:
+    def check(
+        command: str,
+        role: Literal["dev", "qa", "tech-lead"] = "dev",
+    ) -> PolicyResult:
         """
-        Check if a command is allowed for the given agent role.
+        Evaluate a command string against the security policy.
 
-        Args:
-            command: The shell command to validate
-            agent_role: "dev" or "qa"
-
-        Returns:
-            PolicyResult with allowed=True/False and reason.
+        Uses shlex.split() for robust tokenization that handles quoting,
+        escaping, and multi-word arguments correctly.
         """
-        cmd_stripped = command.strip()
 
-        # 1. Global blocklist (always blocked)
-        for pattern in _GLOBAL_BLOCKLIST:
-            if pattern.search(cmd_stripped):
-                return PolicyResult(
-                    allowed=False,
-                    command=cmd_stripped,
-                    reason="Command matches global security blocklist",
-                    matched_rule=pattern.pattern,
-                )
-
-        # 2. QA role: allowlist-only
-        if agent_role == "qa":
-            for pattern in _QA_ALLOWLIST:
-                if pattern.search(cmd_stripped):
-                    return PolicyResult(allowed=True, command=cmd_stripped)
-
-            return PolicyResult(
-                allowed=False,
-                command=cmd_stripped,
-                reason="QA agent can only run read-only and testing commands",
-                matched_rule="qa_allowlist",
-            )
-
-        # 3. Dev role: check extra blocklist
-        if agent_role == "dev":
-            for pattern in _DEV_EXTRA_BLOCKLIST:
-                if pattern.search(cmd_stripped):
+        # ── Step 1: Handle pipes — check each sub-command ────────
+        if "|" in command:
+            sub_commands = [s.strip() for s in command.split("|")]
+            for sub in sub_commands:
+                result = CommandPolicy.check(sub, role)
+                if not result.allowed:
                     return PolicyResult(
                         allowed=False,
-                        command=cmd_stripped,
-                        reason="Command blocked for Dev agent",
-                        matched_rule=pattern.pattern,
+                        reason=f"Piped command contains blocked sub-command: {result.reason}",
+                        matched_rule=result.matched_rule,
                     )
 
-        # 4. Default: allowed for dev
-        return PolicyResult(allowed=True, command=cmd_stripped)
+        # ── Step 2: Handle command chaining (;, &&, ||) ──────────
+        for separator in ["&&", "||", ";"]:
+            if separator in command:
+                sub_commands = [s.strip() for s in command.split(separator)]
+                for sub in sub_commands:
+                    if sub:  # skip empty segments
+                        result = CommandPolicy.check(sub, role)
+                        if not result.allowed:
+                            return result
+
+        # ── Step 3: Tokenize with shlex ──────────────────────────
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return PolicyResult(
+                allowed=False,
+                reason="Command could not be parsed safely (unmatched quote or escape)",
+                matched_rule="shlex_parse_error",
+            )
+
+        if not tokens:
+            return PolicyResult(allowed=True, reason="Empty command")
+
+        base_command = tokens[0].split("/")[-1]  # handle /usr/bin/rm -> rm
+
+        # ── Step 4: Global blocklist ─────────────────────────────
+        if base_command in _GLOBAL_BLOCKED_COMMANDS:
+            return PolicyResult(
+                allowed=False,
+                reason=f"Command '{base_command}' is globally blocked",
+                matched_rule="global_blocklist",
+            )
+
+        # ── Step 5: Destructive command detection ────────────────
+        rm_issue = _is_destructive_rm(tokens)
+        if rm_issue:
+            return PolicyResult(
+                allowed=False,
+                reason=rm_issue,
+                matched_rule="destructive_rm",
+            )
+
+        dd_issue = _is_destructive_dd(tokens)
+        if dd_issue:
+            return PolicyResult(
+                allowed=False,
+                reason=dd_issue,
+                matched_rule="destructive_dd",
+            )
+
+        # ── Step 6: Role-based enforcement ───────────────────────
+        if role == "qa":
+            if base_command not in _QA_ALLOWED_COMMANDS:
+                return PolicyResult(
+                    allowed=False,
+                    reason=f"QA agent is not allowed to run '{base_command}' (allowlist-only)",
+                    matched_rule="qa_allowlist",
+                )
+
+        if role == "dev":
+            if base_command in _DEV_EXTRA_BLOCKED:
+                return PolicyResult(
+                    allowed=False,
+                    reason=f"Dev agent is not allowed to run '{base_command}'",
+                    matched_rule="dev_blocklist",
+                )
+
+        return PolicyResult(allowed=True, reason="Allowed by policy")

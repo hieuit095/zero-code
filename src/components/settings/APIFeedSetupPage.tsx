@@ -147,8 +147,8 @@ function ProviderCard({
       }`}>
       <div className="flex items-start gap-3 px-4 py-3.5">
         <div className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${status === 'success' ? 'bg-emerald-400' :
-            status === 'error' ? 'bg-red-400' :
-              isConfigured ? 'bg-amber-400' : 'bg-slate-700'
+          status === 'error' ? 'bg-red-400' :
+            isConfigured ? 'bg-amber-400' : 'bg-slate-700'
           }`} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-0.5">
@@ -268,22 +268,44 @@ export function APIFeedSetupPage() {
     }));
   };
 
-  const testConnection = (providerId: string) => {
+  const testConnection = async (providerId: string) => {
     setEntries((p) => ({
       ...p,
       [providerId]: { ...p[providerId], testStatus: 'testing', testMessage: '' },
     }));
-    setTimeout(() => {
-      const success = Math.random() > 0.3;
+
+    try {
+      const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
+      if (!apiBase) {
+        throw new Error('VITE_API_BASE_URL is not configured');
+      }
+
+      const entry = entries[providerId];
+      const res = await fetch(`${apiBase}/api/test-connection`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: providerId, key: entry?.key }),
+      });
+
+      const data = await res.json();
       setEntries((p) => ({
         ...p,
         [providerId]: {
           ...p[providerId],
-          testStatus: success ? 'success' : 'error',
-          testMessage: success ? 'API key valid' : 'Unauthorized — check your key',
+          testStatus: data.success ? 'success' : 'error',
+          testMessage: data.message ?? (data.success ? 'API key valid' : 'Connection failed'),
         },
       }));
-    }, 1400);
+    } catch (err) {
+      setEntries((p) => ({
+        ...p,
+        [providerId]: {
+          ...p[providerId],
+          testStatus: 'error',
+          testMessage: err instanceof Error ? err.message : 'Connection test failed',
+        },
+      }));
+    }
   };
 
   const removeEntry = (providerId: string) => {
