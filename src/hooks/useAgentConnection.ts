@@ -7,11 +7,6 @@
 //                   types/index.ts (AgentMessage, Task, AgentRole, AgentStatuses, ActiveActivities)
 
 // [AI-STRICT] UI components MUST import from this hook, never from agentStore directly.
-//             This boundary is intentional — it keeps WebSocket integration changes isolated to this file.
-// [AI-STRICT] The isConnected / isConnecting fields currently return static mock values (true / false).
-//             When the real backend is connected, drive these from WebSocket readyState.
-// [AI-STRICT] sendMessage is a no-op stub. When the real backend is connected, implement it as:
-//             ws.send(JSON.stringify(payload)) — do NOT add optimistic state updates here.
 
 import { useAgentStore } from '../stores/agentStore';
 import type { AgentMessage, Task, AgentRole, AgentStatuses, ActiveActivities } from '../types';
@@ -21,41 +16,29 @@ export interface AgentConnectionReturn {
   tasks: Task[];
   agentStatuses: AgentStatuses;
   activeActivities: ActiveActivities;
-  // @ai-integration-point: isConnected should reflect WebSocket.readyState === WebSocket.OPEN.
-  isConnected: boolean;
-  // @ai-integration-point: isConnecting should reflect WebSocket.readyState === WebSocket.CONNECTING.
-  isConnecting: boolean;
-  // @ai-integration-point: Replace this stub with ws.send(JSON.stringify(payload)).
-  //   Expected payload shape: { type: 'user:message', content: string } — confirm with backend API spec.
+  runStatus: string | null;
+  runProgress: number;
+  qaRetryState: ReturnType<typeof useAgentStore.getState>['qaRetryState'];
   sendMessage: (payload: unknown) => void;
 }
 
-/**
- * useAgentConnection
- *
- * Data transport abstraction for agent state.
- * Currently backed by Zustand mock store.
- *
- * WebSocket integration path:
- *   Replace the store selectors below with a useEffect that opens
- *   a WebSocket to the Python backend. On each `onmessage` event,
- *   dispatch to the store via addMessage / updateAgentStatus / updateTask.
- *   Set isConnected/isConnecting from the WS readyState.
- *   Wire sendMessage to ws.send(JSON.stringify(payload)).
- */
 export function useAgentConnection(): AgentConnectionReturn {
   const messages = useAgentStore((s) => s.messages);
   const tasks = useAgentStore((s) => s.tasks);
   const agentStatuses = useAgentStore((s) => s.agentStatuses);
   const activeActivities = useAgentStore((s) => s.activeActivities);
+  const runStatus = useAgentStore((s) => s.runStatus);
+  const runProgress = useAgentStore((s) => s.runProgress);
+  const qaRetryState = useAgentStore((s) => s.qaRetryState);
 
   return {
     messages,
     tasks,
     agentStatuses,
     activeActivities,
-    isConnected: true,
-    isConnecting: false,
+    runStatus,
+    runProgress,
+    qaRetryState,
     sendMessage: (_payload: unknown) => {
       // @ai-integration-point: Replace with ws.send(JSON.stringify(_payload))
     },
@@ -67,12 +50,14 @@ export function useAgentConnection(): AgentConnectionReturn {
 //   NOT from UI components. UI components should only call sendMessage() for user-initiated events.
 export function useAgentActions() {
   const addMessage = useAgentStore((s) => s.addMessage);
+  const addMessageFromServer = useAgentStore((s) => s.addMessageFromServer);
   const updateAgentStatus = useAgentStore((s) => s.updateAgentStatus);
   const updateTask = useAgentStore((s) => s.updateTask);
-  const isSimulationRunning = useAgentStore((s) => s.isSimulationRunning);
-  const simulationProgress = useAgentStore((s) => s.simulationProgress);
+  const setTasks = useAgentStore((s) => s.setTasks);
+  const runStatus = useAgentStore((s) => s.runStatus);
+  const runProgress = useAgentStore((s) => s.runProgress);
 
-  return { addMessage, updateAgentStatus, updateTask, isSimulationRunning, simulationProgress };
+  return { addMessage, addMessageFromServer, updateAgentStatus, updateTask, setTasks, runStatus, runProgress };
 }
 
 export function useAgentStatus(agent: AgentRole) {

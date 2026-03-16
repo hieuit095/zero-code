@@ -1,8 +1,8 @@
 // @ai-module: Header
-// @ai-role: Top application bar containing the goal input, Generate button, simulation controls,
+// @ai-role: Top application bar containing the goal input, Generate button, run controls,
 //           agent status indicator, and the Settings gear icon that opens SettingsModal.
 //           Also hosts the SettingsModal component itself (rendered at the header level so it portals correctly).
-// @ai-dependencies: hooks/useSimulation.ts (isRunning, progress, startSimulation, resetSimulation)
+// @ai-dependencies: hooks/useRunConnection.ts (startRun, disconnect, runStatus, runProgress)
 //                   components/settings/SettingsModal.tsx (modal shell)
 
 // [AI-STRICT] The "Generate" / goal input workflow is mock-only scaffolding (setIsGenerating with a 2-second timeout).
@@ -19,22 +19,35 @@
 
 
 import { useState } from 'react';
-import { Bot, Sparkles, Settings, ChevronDown, Zap, Play, RotateCcw } from 'lucide-react';
-import { useSimulation } from '../hooks/useSimulation';
+import { Bot, Sparkles, Settings, ChevronDown, Zap, RotateCcw } from 'lucide-react';
+import { useRunConnection } from '../hooks/useRunConnection';
+import { useAgentStore } from '../stores/agentStore';
 import { SettingsModal } from './settings/SettingsModal';
 import type { SettingsTab } from './settings/SettingsModal';
 
 export function Header() {
   const [goal, setGoal] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('agent-setup');
-  const { isRunning, progress, startSimulation, resetSimulation } = useSimulation();
+  const { startRun, disconnect } = useRunConnection();
+  const runStatus = useAgentStore((s) => s.runStatus);
+  const progress = useAgentStore((s) => s.runProgress);
+  const resetAgent = useAgentStore((s) => s.resetToInitial);
 
-  const handleGenerate = () => {
-    if (!goal.trim()) return;
-    setIsGenerating(true);
-    setTimeout(() => setIsGenerating(false), 2000);
+  const isRunning = runStatus !== null && runStatus !== 'completed' && runStatus !== 'failed';
+
+  const handleGenerate = async () => {
+    if (!goal.trim() || isRunning) return;
+    try {
+      await startRun({ goal, workspaceId: 'repo-main' });
+    } catch {
+      // Connection error is shown via runConnection state
+    }
+  };
+
+  const handleReset = () => {
+    disconnect();
+    resetAgent();
   };
 
   return (
@@ -68,11 +81,11 @@ export function Header() {
         </div>
         <button
           onClick={handleGenerate}
-          disabled={!goal.trim() || isGenerating || isRunning}
+          disabled={!goal.trim() || isRunning}
           className="flex items-center gap-1.5 px-4 py-2 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors shrink-0"
         >
-          <Zap className={`w-3.5 h-3.5 ${isGenerating ? 'animate-pulse' : ''}`} />
-          {isGenerating ? 'Running...' : 'Generate'}
+          <Zap className={`w-3.5 h-3.5 ${isRunning ? 'animate-pulse' : ''}`} />
+          {isRunning ? 'Running...' : 'Generate'}
         </button>
       </div>
 
@@ -82,7 +95,7 @@ export function Header() {
             <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-1.5">
               <div className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                <span className="text-xs text-amber-300 font-medium">Simulating...</span>
+                <span className="text-xs text-amber-300 font-medium">Running...</span>
               </div>
               <div className="w-20 h-1 rounded-full bg-slate-800 overflow-hidden">
                 <div
@@ -93,23 +106,13 @@ export function Header() {
               <span className="text-[10px] text-amber-400 font-mono w-7 text-right">{progress}%</span>
             </div>
           ) : (
-            <>
-              <button
-                onClick={startSimulation}
-                disabled={isRunning}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Play className="w-3 h-3 text-emerald-400" />
-                Simulate
-              </button>
-              <button
-                onClick={resetSimulation}
-                title="Reset simulation state"
-                className="p-1.5 rounded-md hover:bg-slate-800 border border-transparent hover:border-slate-700 text-slate-500 hover:text-slate-300 transition-colors"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-              </button>
-            </>
+            <button
+              onClick={handleReset}
+              title="Reset run state"
+              className="p-1.5 rounded-md hover:bg-slate-800 border border-transparent hover:border-slate-700 text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
           )}
         </div>
 

@@ -1,0 +1,55 @@
+# Multi-Agent IDE — Staging Docker Compose
+# Rule 3: Only frontend (80) and API (8000) ports exposed to host.
+#          MCP facade (/internal/mcp) is blocked by Nginx and never exposed.
+
+services:
+  # ─── Frontend (React + Nginx) ────────────────────────────────────────
+  frontend-web:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - orchestrator-api
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    restart: unless-stopped
+
+  # ─── Backend (FastAPI Orchestrator + MCP Facade) ─────────────────────
+  orchestrator-api:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - api-data:/app/data
+    env_file:
+      - .env.staging
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # ─── Redis (Event Broker / Future Cache) ─────────────────────────────
+  redis:
+    image: redis:7-alpine
+    # No ports exposed to host — internal only
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+  # ─── PostgreSQL (Optional — swap from SQLite for production) ─────────
+  # Uncomment below to use Postgres instead of SQLite:
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: zerocode
+  #     POSTGRES_USER: zerocode
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+  #   volumes:
+  #     - pg-data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+volumes:
+  api-data:
+  redis-data: # pg-data:

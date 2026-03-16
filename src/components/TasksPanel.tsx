@@ -1,18 +1,13 @@
 // @ai-module: Tasks Panel
 // @ai-role: Pure presentational component rendering the task list with status icons, agent badges,
-//           and subtask expansion. Receives tasks[] as a prop — no direct store access.
-//           Local state tracks which task rows are expanded (Set<string>).
+//           QA retry indicators, and subtask expansion. Receives tasks[] and qaRetryState as props.
 // @ai-dependencies: Props only (Task[] — sourced from useAgentConnection in TerminalTaskPanel)
-//                   types/index.ts (Task, AgentRole)
 
 // [AI-STRICT] TasksPanel is a PURE presentational component. DO NOT add store selectors here.
-// [AI-STRICT] Task status transitions (pending -> in-progress -> completed) are managed exclusively
-//             by agentStore.updateTask(). This component only displays — it does not mutate task state.
-// @ai-integration-point: When the real backend is connected, no changes to TasksPanel are needed.
-//   The task data will flow in via useAgentConnection (driven by WebSocket task:update events -> agentStore).
+// [AI-STRICT] Task status transitions are managed by agentStore.updateTask(). This component only displays.
 
 
-import { CheckCircle2, Circle, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Circle, Loader2, ChevronDown, ChevronRight, RotateCw } from 'lucide-react';
 import { useState } from 'react';
 import type { Task, AgentRole } from '../types';
 
@@ -28,11 +23,21 @@ const agentLabel: Record<AgentRole, string> = {
   qa: 'QA',
 };
 
-interface TasksPanelProps {
-  tasks: Task[];
+interface QaRetryState {
+  taskId: string;
+  attempt: number;
+  maxAttempts: number;
+  status: 'failed' | 'retrying' | 'passed';
+  failingCommand: string | null;
+  defectSummary: string | null;
 }
 
-export function TasksPanel({ tasks }: TasksPanelProps) {
+interface TasksPanelProps {
+  tasks: Task[];
+  qaRetryState?: QaRetryState | null;
+}
+
+export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const toggle = (id: string) => {
@@ -79,33 +84,72 @@ export function TasksPanel({ tasks }: TasksPanelProps) {
         </div>
       </div>
 
+      {/* ── QA Retry Banner ────────────────────────────────────────── */}
+      {qaRetryState && (qaRetryState.status === 'retrying' || qaRetryState.status === 'failed') && (
+        <div className={`mx-2 mt-2 px-3 py-2 rounded-lg border text-xs ${qaRetryState.status === 'retrying'
+            ? 'bg-amber-500/5 border-amber-500/20 text-amber-300'
+            : 'bg-red-500/5 border-red-500/20 text-red-300'
+          }`}>
+          <div className="flex items-center gap-2 font-medium">
+            {qaRetryState.status === 'retrying' ? (
+              <RotateCw className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <AlertTriangle className="w-3.5 h-3.5" />
+            )}
+            <span>
+              QA {qaRetryState.status === 'retrying' ? 'Failed' : 'Failed'} — Attempt {qaRetryState.attempt}/{qaRetryState.maxAttempts}
+              {qaRetryState.status === 'retrying' && ' — Dev Retrying'}
+            </span>
+          </div>
+          {qaRetryState.failingCommand && (
+            <div className="mt-1.5 pl-5.5 font-mono text-[10px] text-slate-400 truncate">
+              $ {qaRetryState.failingCommand}
+            </div>
+          )}
+          {qaRetryState.defectSummary && (
+            <div className="mt-1 pl-5.5 text-[10px] text-slate-500 line-clamp-2">
+              {qaRetryState.defectSummary}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-2 py-1">
         {tasks.map((task) => {
           const isExpanded = expanded.has(task.id);
+          const isRetrying = qaRetryState?.taskId === task.id && qaRetryState.status === 'retrying';
           return (
             <div key={task.id} className="mb-0.5">
               <div
-                className={`flex items-start gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${
-                  task.status === 'in-progress'
-                    ? 'bg-sky-500/5 hover:bg-sky-500/10'
-                    : 'hover:bg-slate-800'
-                }`}
+                className={`flex items-start gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${isRetrying
+                    ? 'bg-amber-500/5 hover:bg-amber-500/10 ring-1 ring-amber-500/20'
+                    : task.status === 'in-progress'
+                      ? 'bg-sky-500/5 hover:bg-sky-500/10'
+                      : 'hover:bg-slate-800'
+                  }`}
                 onClick={() => task.subtasks && toggle(task.id)}
               >
                 <div className="mt-0.5 shrink-0">
-                  {task.status === 'completed' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
-                  {task.status === 'in-progress' && <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin" />}
-                  {task.status === 'pending' && <Circle className="w-3.5 h-3.5 text-slate-600" />}
+                  {isRetrying && <RotateCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />}
+                  {!isRetrying && task.status === 'completed' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                  {!isRetrying && task.status === 'in-progress' && <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin" />}
+                  {!isRetrying && task.status === 'pending' && <Circle className="w-3.5 h-3.5 text-slate-600" />}
                 </div>
-                <span className={`flex-1 text-xs leading-relaxed ${
-                  task.status === 'completed'
-                    ? 'text-slate-500 line-through'
-                    : task.status === 'in-progress'
-                    ? 'text-slate-200'
-                    : 'text-slate-400'
-                }`}>
+                <span className={`flex-1 text-xs leading-relaxed ${isRetrying
+                    ? 'text-amber-200'
+                    : task.status === 'completed'
+                      ? 'text-slate-500 line-through'
+                      : task.status === 'in-progress'
+                        ? 'text-slate-200'
+                        : 'text-slate-400'
+                  }`}>
                   {task.label}
                 </span>
+                {isRetrying && (
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border text-amber-300 bg-amber-500/10 border-amber-500/20 shrink-0">
+                    Retry
+                  </span>
+                )}
                 <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${agentBadge[task.agent]} shrink-0`}>
                   {agentLabel[task.agent]}
                 </span>

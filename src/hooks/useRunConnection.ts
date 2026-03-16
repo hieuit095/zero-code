@@ -1,0 +1,554 @@
+/**
+ * WebSocket + REST bridge for the run lifecycle defined in `plan.md` section 3.
+ *
+ * REST request shape sent to `POST /api/runs`:
+ * {
+ *   "goal": "Build the first version of a multi-agent IDE backend",
+ *   "workspaceId": "repo-main",
+ *   "agentConfig": {
+ *     "tech-lead": { "model": "gpt-4o" },
+ *     "dev": { "model": "gpt-4o" },
+ *     "qa": { "model": "gpt-4o-mini" }
+ *   }
+ * }
+ *
+ * WebSocket server envelope shape expected from the backend:
+ * {
+ *   "type": "agent:status",
+ *   "runId": "run_01JXYZ...",
+ *   "seq": 42,
+ *   "timestamp": "2026-03-16T05:20:14.221Z",
+ *   "data": {}
+ * }
+ */
+
+import { useEffect, useRef, useState } from 'react';
+import { useAgentStore } from '../stores/agentStore';
+import { useFileStore } from '../stores/fileStore';
+import { useTerminalStore } from '../stores/terminalStore';
+import type {
+  ConnectionReadyEvent,
+  RunSocketClientEvent,
+  RunSocketServerEvent,
+  RunStartData,
+} from '../types/runEvents';
+
+const DEFAULT_API_BASE_URL = 'http://localhost:8000';
+const TERMINAL_EVENT_TYPES = new Set(['run:complete', 'run:error']);
+const SERVER_EVENT_TYPES = new Set<RunSocketServerEvent['type']>([
+  'connection:ready',
+  'run:created',
+  'run:state',
+  'run:complete',
+  'run:error',
+  'agent:status',
+  'agent:message:start',
+  'agent:message:delta',
+  'agent:message',
+  'task:snapshot',
+  'task:update',
+  'fs:tree',
+  'dev:start-edit',
+  'fs:update',
+  'dev:stop-edit',
+  'terminal:command',
+  'terminal:output',
+  'terminal:exit',
+  'qa:report',
+  'qa:passed',
+]);
+
+export interface RunConnectionState {
+  runId: string | null;
+  runStatus: string | null;
+  runPhase: string | null;
+  runProgress: number;
+  isConnected: boolean;
+  isConnecting: boolean;
+  reconnectAttempt: number;
+  lastEvent: RunSocketServerEvent | null;
+  connectionReady: ConnectionReadyEvent['data'] | null;
+  error: string | null;
+}
+
+export type StartRunOptions = RunStartData;
+
+export interface UseRunConnectionReturn extends RunConnectionState {
+  startRun: (options: StartRunOptions) => Promise<{ runId: string; wsUrl: string }>;
+  disconnect: () => void;
+  sendMessage: (event: RunSocketClientEvent) => boolean;
+  cancelRun: (reason?: string) => boolean;
+  refreshWorkspace: (reason?: string) => boolean;
+  interruptRun: (message: string) => boolean;
+}
+
+interface RunCreateResponse {
+  runId: string;
+  workspaceId: string;
+  status: string;
+  wsUrl: string;
+}
+
+function getApiBaseUrl() {
+  return import.meta.env.VITE_API_BASE_URL?.trim() || DEFAULT_API_BASE_URL;
+}
+
+function getAbsoluteWebSocketUrl(input: string) {
+  if (input.startsWith('ws://') || input.startsWith('wss://')) {
+    return input;
+  }
+
+  const apiBaseUrl = getApiBaseUrl();
+  const apiUrl = new URL(apiBaseUrl);
+  const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+
+  if (input.startsWith('/')) {
+    return `${wsProtocol}//${apiUrl.host}${input}`;
+  }
+
+  return `${wsProtocol}//${apiUrl.host}/${input.replace(/^\/+/, '')}`;
+}
+
+function isRunSocketServerEvent(value: unknown): value is RunSocketServerEvent {
+  if (typeof value !== 'object' || value === null) return false;
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.type === 'string' &&
+    SERVER_EVENT_TYPES.has(candidate.type as RunSocketServerEvent['type']) &&
+    typeof candidate.seq === 'number' &&
+    typeof candidate.timestamp === 'string' &&
+    'data' in candidate
+  );
+}
+
+async function createRunRequest(options: StartRunOptions) {
+  const response = await fetch(`${getApiBaseUrl()}/api/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to create run: ${response.status} ${response.statusText}`);
+  }
+
+  return (await response.json()) as RunCreateResponse;
+}
+
+export function useRunConnection(): UseRunConnectionReturn {
+  const addMessageFromServer = useAgentStore((state) => state.addMessageFromServer);
+  const updateAgentStatus = useAgentStore((state) => state.updateAgentStatus);
+  const updateTask = useAgentStore((state) => state.updateTask);
+  const setTasks = useAgentStore((state) => state.setTasks);
+  const setRunStatus = useAgentStore((state) => state.setRunStatus);
+  const setRunProgress = useAgentStore((state) => state.setRunProgress);
+  const setQaRetryState = useAgentStore((state) => state.setQaRetryState);
+  const clearQaRetryState = useAgentStore((state) => state.clearQaRetryState);
+  const setFileTree = useFileStore((state) => state.setFileTree);
+  const setFileFromServer = useFileStore((state) => state.setFileFromServer);
+  const setAIControlMode = useFileStore((state) => state.setAIControlMode);
+  const appendTerminalLine = useTerminalStore((state) => state.appendLine);
+  const clearTerminal = useTerminalStore((state) => state.clearTerminal);
+  const setTerminalStreaming = useTerminalStore((state) => state.setStreaming);
+
+  const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const shouldReconnectRef = useRef(false);
+  const lastWsUrlRef = useRef<string | null>(null);
+
+  const [state, setState] = useState<RunConnectionState>({
+    runId: null,
+    runStatus: null,
+    runPhase: null,
+    runProgress: 0,
+    isConnected: false,
+    isConnecting: false,
+    reconnectAttempt: 0,
+    lastEvent: null,
+    connectionReady: null,
+    error: null,
+  });
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  };
+
+  const disconnect = () => {
+    shouldReconnectRef.current = false;
+    clearReconnectTimer();
+    socketRef.current?.close();
+    socketRef.current = null;
+
+    setState((current) => ({
+      ...current,
+      isConnected: false,
+      isConnecting: false,
+      reconnectAttempt: 0,
+    }));
+  };
+
+  const sendMessage = (event: RunSocketClientEvent) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    socket.send(JSON.stringify(event));
+    return true;
+  };
+
+  const dispatchServerEvent = (event: RunSocketServerEvent) => {
+    setState((current) => ({
+      ...current,
+      runId: event.runId ?? current.runId,
+      lastEvent: event,
+      error: event.type === 'run:error' ? event.data.message : current.error,
+    }));
+
+    switch (event.type) {
+      case 'connection:ready': {
+        setState((current) => ({
+          ...current,
+          connectionReady: event.data,
+          isConnected: true,
+          isConnecting: false,
+          error: null,
+        }));
+        break;
+      }
+
+      case 'run:created': {
+        clearTerminal();
+        setState((current) => ({
+          ...current,
+          runId: event.runId,
+          runStatus: event.data.status,
+          error: null,
+        }));
+        break;
+      }
+
+      case 'run:state': {
+        setState((current) => ({
+          ...current,
+          runStatus: event.data.status,
+          runPhase: event.data.phase,
+          runProgress: event.data.progress,
+        }));
+
+        setRunStatus(event.data.status);
+        setRunProgress(event.data.progress);
+
+        if (event.data.status !== 'completed' && event.data.status !== 'failed') {
+          setTerminalStreaming(true);
+        }
+        break;
+      }
+
+      case 'run:complete':
+      case 'run:error': {
+        setTerminalStreaming(false);
+        shouldReconnectRef.current = false;
+
+        setRunStatus(event.data.status);
+        if (event.type === 'run:complete') {
+          setRunProgress(100);
+        }
+
+        setState((current) => ({
+          ...current,
+          runStatus: event.data.status,
+          runProgress: event.type === 'run:complete' ? 100 : current.runProgress,
+          error: event.type === 'run:error' ? event.data.message : null,
+        }));
+        break;
+      }
+
+      case 'agent:status': {
+        // @ai-integration-point: agent:status -> agentStore.updateAgentStatus - Replace this direct dispatch with a backend-authoritative hydration path once `agentStore` supports snapshots and server IDs.
+        updateAgentStatus(event.data.role, event.data.state, event.data.activity);
+        break;
+      }
+
+      case 'agent:message:start':
+      case 'agent:message:delta': {
+        // @ai-integration-point: agent:message streaming - Add a dedicated transient message buffer store for incremental thought streaming before persisting finalized `agent:message` events.
+        break;
+      }
+
+      case 'agent:message': {
+        // Server-authoritative: preserves backend-provided id and timestamp
+        addMessageFromServer({
+          id: event.data.id,
+          agent: event.data.agent,
+          agentLabel: event.data.agentLabel,
+          content: event.data.content,
+          timestamp: event.data.timestamp,
+        });
+        break;
+      }
+
+      case 'task:snapshot': {
+        setTasks(event.data.tasks);
+        break;
+      }
+
+      case 'task:update': {
+        // @ai-integration-point: task:update -> agentStore.updateTask - This is the minimal live-task path until the store supports full snapshot hydration.
+        updateTask(event.data.taskId, event.data.status);
+        break;
+      }
+
+      case 'fs:tree': {
+        setFileTree(event.data.tree);
+        break;
+      }
+
+      case 'dev:start-edit': {
+        // @ai-integration-point: dev:start-edit -> fileStore.setAIControlMode - Keep Monaco readOnly while the Dev agent owns the active file.
+        setAIControlMode(true, event.data.fileName);
+        break;
+      }
+
+      case 'fs:update': {
+        setFileFromServer(event.data.name, event.data.path, event.data.language, event.data.content);
+        break;
+      }
+
+      case 'dev:stop-edit': {
+        // @ai-integration-point: dev:stop-edit -> fileStore.setAIControlMode - Release Monaco back to user-editable mode when the Dev agent finishes.
+        setAIControlMode(false, event.data.fileName);
+        break;
+      }
+
+      case 'terminal:command': {
+        // @ai-integration-point: terminal:command -> terminalStore.appendLine - Surface the sandbox command before stdout/stderr events begin streaming.
+        appendTerminalLine(`$ ${event.data.command}`, 'command');
+        setTerminalStreaming(true);
+        break;
+      }
+
+      case 'terminal:output': {
+        // @ai-integration-point: terminal:output -> terminalStore.appendLine - Replace line-by-line writes with buffered batch flushing if the sandbox starts chunking output.
+        appendTerminalLine(event.data.text, event.data.logType);
+        break;
+      }
+
+      case 'terminal:exit': {
+        appendTerminalLine(
+          `[process exited with code ${event.data.exitCode} in ${event.data.durationMs}ms]`,
+          event.data.exitCode === 0 ? 'success' : 'warn'
+        );
+        break;
+      }
+
+      case 'qa:report': {
+        // QA defect report — update retry state for UI indicators
+        setQaRetryState({
+          taskId: event.data.taskId,
+          attempt: event.data.attempt,
+          maxAttempts: 3,
+          status: event.data.retryable ? 'retrying' : 'failed',
+          failingCommand: event.data.failingCommand,
+          defectSummary: event.data.summary,
+        });
+
+        addMessageFromServer({
+          id: `qa-report-${event.seq}`,
+          agent: 'qa',
+          agentLabel: 'QA',
+          content: event.data.summary,
+          timestamp: event.timestamp,
+        });
+
+        event.data.rawLogTail.forEach((line) => {
+          appendTerminalLine(line, 'error');
+        });
+        break;
+      }
+
+      case 'qa:passed': {
+        // QA passed — clear retry state
+        clearQaRetryState();
+
+        addMessageFromServer({
+          id: `qa-passed-${event.seq}`,
+          agent: 'qa',
+          agentLabel: 'QA',
+          content: event.data.summary,
+          timestamp: event.timestamp,
+        });
+        break;
+      }
+    }
+
+    if (TERMINAL_EVENT_TYPES.has(event.type)) {
+      setTerminalStreaming(false);
+    }
+  };
+
+  const connect = (wsUrl: string) => {
+    clearReconnectTimer();
+    shouldReconnectRef.current = true;
+    lastWsUrlRef.current = wsUrl;
+
+    socketRef.current?.close();
+
+    const socket = new WebSocket(wsUrl);
+    socketRef.current = socket;
+
+    setState((current) => ({
+      ...current,
+      isConnecting: true,
+      isConnected: false,
+      error: null,
+    }));
+
+    socket.onopen = () => {
+      setState((current) => ({
+        ...current,
+        isConnected: true,
+        isConnecting: false,
+        reconnectAttempt: 0,
+        error: null,
+      }));
+    };
+
+    socket.onmessage = (messageEvent) => {
+      try {
+        const parsed: unknown = JSON.parse(messageEvent.data);
+
+        if (!isRunSocketServerEvent(parsed)) {
+          throw new Error('Received an unknown websocket message shape.');
+        }
+
+        dispatchServerEvent(parsed);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to parse websocket event.';
+        setState((current) => ({
+          ...current,
+          error: message,
+        }));
+      }
+    };
+
+    socket.onerror = () => {
+      setState((current) => ({
+        ...current,
+        error: 'The websocket connection encountered an error.',
+      }));
+    };
+
+    socket.onclose = () => {
+      socketRef.current = null;
+
+      setState((current) => ({
+        ...current,
+        isConnected: false,
+        isConnecting: false,
+      }));
+
+      if (!shouldReconnectRef.current || !lastWsUrlRef.current) {
+        return;
+      }
+
+      setState((current) => {
+        const reconnectAttempt = current.reconnectAttempt + 1;
+        const reconnectDelay = Math.min(1000 * 2 ** (reconnectAttempt - 1), 10_000);
+
+        reconnectTimerRef.current = window.setTimeout(() => {
+          connect(lastWsUrlRef.current!);
+        }, reconnectDelay);
+
+        return {
+          ...current,
+          reconnectAttempt,
+          isConnecting: true,
+        };
+      });
+    };
+  };
+
+  const startRun = async (options: StartRunOptions) => {
+    disconnect();
+
+    setState((current) => ({
+      ...current,
+      runStatus: 'queued',
+      runPhase: 'creating-run',
+      runProgress: 0,
+      error: null,
+    }));
+
+    const run = await createRunRequest(options);
+    const absoluteWsUrl = getAbsoluteWebSocketUrl(run.wsUrl);
+
+    setState((current) => ({
+      ...current,
+      runId: run.runId,
+      runStatus: run.status,
+      runPhase: 'connecting',
+    }));
+
+    connect(absoluteWsUrl);
+    return { runId: run.runId, wsUrl: absoluteWsUrl };
+  };
+
+  const cancelRun = (reason = 'user_cancelled') => {
+    const runId = state.runId;
+    if (!runId) return false;
+
+    return sendMessage({
+      type: 'run:cancel',
+      runId,
+      data: { reason },
+    });
+  };
+
+  const refreshWorkspace = (reason = 'manual_refresh') => {
+    const runId = state.runId;
+    if (!runId) return false;
+
+    return sendMessage({
+      type: 'workspace:refresh',
+      runId,
+      data: { reason },
+    });
+  };
+
+  const interruptRun = (message: string) => {
+    const runId = state.runId;
+    if (!runId) return false;
+
+    return sendMessage({
+      type: 'user:interrupt',
+      runId,
+      data: { message },
+    });
+  };
+
+  useEffect(() => {
+    return () => {
+      shouldReconnectRef.current = false;
+      clearReconnectTimer();
+      socketRef.current?.close();
+      socketRef.current = null;
+    };
+  }, []);
+
+  return {
+    ...state,
+    startRun,
+    disconnect,
+    sendMessage,
+    cancelRun,
+    refreshWorkspace,
+    interruptRun,
+  };
+}
+
+// @ai-integration-point: Header Wiring - Replace `useSimulation()` in `Header.tsx` with this hook once the backend stub is live and the stores gain snapshot hydration actions.

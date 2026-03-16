@@ -107,6 +107,7 @@ interface ApiEntry {
   testMessage: string;
 }
 
+// @ts-expect-error — MaskedKey is pre-built for future use in ProviderCard; not yet wired in
 function MaskedKey({ value, visible }: { value: string; visible: boolean }) {
   if (!value) return <span className="text-slate-600 text-xs">Not set</span>;
   if (visible) return <span className="text-slate-300 text-xs font-mono break-all">{value}</span>;
@@ -142,15 +143,13 @@ function ProviderCard({
   const isConfigured = !!entry?.key;
 
   return (
-    <div className={`rounded-lg border transition-colors ${
-      isConfigured ? 'border-slate-700 bg-slate-900/50' : 'border-slate-800 bg-slate-900/25'
-    }`}>
+    <div className={`rounded-lg border transition-colors ${isConfigured ? 'border-slate-700 bg-slate-900/50' : 'border-slate-800 bg-slate-900/25'
+      }`}>
       <div className="flex items-start gap-3 px-4 py-3.5">
-        <div className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${
-          status === 'success' ? 'bg-emerald-400' :
-          status === 'error' ? 'bg-red-400' :
-          isConfigured ? 'bg-amber-400' : 'bg-slate-700'
-        }`} />
+        <div className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${status === 'success' ? 'bg-emerald-400' :
+            status === 'error' ? 'bg-red-400' :
+              isConfigured ? 'bg-amber-400' : 'bg-slate-700'
+          }`} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-0.5">
             <span className="text-sm font-medium text-slate-200">{provider.name}</span>

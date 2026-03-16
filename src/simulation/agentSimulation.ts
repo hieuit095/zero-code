@@ -1,3 +1,6 @@
+// @ts-nocheck — DEPRECATED: This file is dead code left for reference only.
+// It was the mock simulation engine for the prototype. It is not imported anywhere.
+// Remove this file entirely when cleaning up deprecated code.
 // @ai-module: Agent Simulation Engine
 // @ai-role: Scripted, time-delayed simulation of a multi-agent run. Directly calls Zustand store
 //           actions (agentStore, terminalStore, fileStore) on a timer to fake real agent behavior.
