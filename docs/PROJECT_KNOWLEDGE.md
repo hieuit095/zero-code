@@ -12,22 +12,25 @@ This file is derived from `plan.md` and `deployment-plan.md`. Keep those documen
 - Preserve the product's defining behavior: the system must verify its own work inside a sandbox and fix itself when verification fails.
 - Implement the workflow as a **non-linear execution loop**, not a linear chain.
 
-**Canonical execution loop**
+**Canonical execution loop (Mentorship-Enabled)**
 
 1. **Leader (Planner)** receives the user goal.
 2. **Leader** decomposes the goal into explicit tasks with acceptance criteria.
 3. **Dev (Coder)** inspects the repository and edits code inside the sandbox.
-4. **QA (Tester in Sandbox)** runs lint, typecheck, tests, and targeted verification inside the same sandbox.
-5. If QA passes, return the result to **Leader** for task completion and next-task planning.
-6. If QA fails, QA must emit a structured **`qa:report`** directly to **Dev**.
-7. **Dev (Fixer)** must patch the code using the QA defect report.
-8. **QA (Retest)** must re-run verification inside the same sandbox.
-9. Repeat **Dev -> QA -> Dev -> QA** until the task passes, retry limits are exceeded, or escalation is required.
+4. **QA (Tester in Sandbox)** runs lint, typecheck, tests, and targeted verification inside the same sandbox, producing 4-dimensional scores (Code Quality, Requirements, Robustness, Security).
+5. If QA passes all thresholds, return the result to **Leader** for task completion and next-task planning.
+6. If QA fails (Attempt 1), QA emits a structured **`qa:report`** with dimensional scores and a `critique_report.md` artifact.
+7. **Dev (Retry)** patches the code using the QA critique report.
+8. **QA (Retest)** re-runs verification inside the same sandbox.
+9. If QA fails again (Attempt 2), the **TaskDelegator intercepts** the failure — state shifts to **`LEADER_REVIEW`**.
+10. **Leader (Mentorship Mode)** reads `critique_report.md` and the broken code. It outputs architectural guidance into `leader_guidance.md` — it does NOT write code.
+11. **Dev (Mentored Attempt 3)** receives the guidance and applies the exact fix.
+12. **QA (Final Retest)** runs verification. If this also fails, the task escalates to Leader for full re-planning.
 
-**Escalate back to Leader only when**
+**Escalate to Leader re-planning only when**
 
-- retries exceed policy
-- the defect implies architectural redesign
+- the mentored Dev attempt (Attempt 3) also fails
+- the defect implies architectural redesign beyond mentorship scope
 - the sandbox is broken or inconsistent
 - the QA signal is ambiguous
 
@@ -35,8 +38,8 @@ This file is derived from `plan.md` and `deployment-plan.md`. Keep those documen
 
 - Keep **Dev and QA in the same run-scoped workspace** so edits and test context persist across retries.
 - Make the retry loop visible in the UI with attempt counts, current task, active file, and active command.
-- Require QA to produce structured failure data, not only raw logs.
-- Treat the Leader as the planner and escalation point, not the relay for every QA failure.
+- Require QA to produce structured failure data with dimensional scores, not only raw logs.
+- Treat the Leader as the planner, mentorship debugger, and escalation point — not the relay for every QA failure.
 
 ## 2. Technology Stack & System Boundaries
 
@@ -72,6 +75,20 @@ This file is derived from `plan.md` and `deployment-plan.md`. Keep those documen
 - Use **OpenHands SDK** as the execution substrate.
 - Expose OpenHands to agents **only through a run-scoped HTTP MCP service**.
 - Treat the sandbox MCP facade as the native tool surface for file operations, patching, command execution, tests, logs, and artifacts.
+
+**LLM Economic Routing**
+
+The system dynamically routes tasks to specialized models based on cost and capability:
+
+| Agent | Role | Model Tier | Examples |
+|-------|------|------------|----------|
+| **Leader** | Planning & Mentorship Debugging | High-cost, high-reasoning | Gemini 3.1 Pro, GPT-4o |
+| **Dev** | Code implementation | Low-cost, high SWE-Bench | Minimax m2.5, DeepSeek Coder |
+| **QA** | Testing & 4D critique scoring | Mid-cost, high-logic | GLM 5, Claude 3.5 Sonnet |
+
+- Routing is configured per-run via `LLMRoutingModel` (database-persisted, UI-editable).
+- API keys are stored encrypted with Fernet symmetric encryption in `APIKeyModel`.
+- The Leader model is invoked sparingly: once for planning, then only for mentorship if Dev fails 2 attempts.
 
 **Canonical control path**
 
@@ -172,9 +189,10 @@ This file is derived from `plan.md` and `deployment-plan.md`. Keep those documen
   - `DEVELOPING`
   - `VERIFYING`
   - `RETRYING`
+  - `LEADER_REVIEW`
   - `DONE`
   - `FAILED`
-- Keep retry policy, escalation policy, and cancellation behavior inside backend orchestration code.
+- Keep retry policy, escalation policy, mentorship interception, and cancellation behavior inside backend orchestration code.
 - Preserve snapshot recovery and reconnect semantics whenever run state changes.
 
 ## 5. Backend and Sandbox Implementation Directives

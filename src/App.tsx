@@ -1,7 +1,8 @@
 // @ai-module: App Root
 // @ai-role: Application shell with simple hash-based routing.
 //           Renders the IDE layout by default, or the AdminDashboard for #/admin.
-// @ai-dependencies: None (no direct store or hook imports — layout + routing only)
+//           Includes a global fatal error banner reading from useRunConnection.
+// @ai-dependencies: hooks/useRunConnection.ts (error state for crash banner)
 
 // [AI-STRICT] DO NOT add global state, context providers, or data fetching to this file.
 //             All state management is Zustand-based and accessed within the relevant leaf components.
@@ -14,6 +15,8 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { Header } from './components/Header';
 import { LeftSidebar } from './components/LeftSidebar';
 import { RightWorkspace } from './components/RightWorkspace';
+import { useRunConnection } from './hooks/useRunConnection';
+import { XCircle, X } from 'lucide-react';
 
 const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
 
@@ -28,8 +31,34 @@ function useHashRoute() {
 }
 
 function IDELayout() {
+  const { error } = useRunConnection();
+  const [dismissed, setDismissed] = useState(false);
+
+  // Reset dismissed when a new error arrives
+  useEffect(() => {
+    if (error) setDismissed(false);
+  }, [error]);
+
+  const showErrorBanner = error && !dismissed;
+
   return (
     <div className="h-screen w-screen overflow-hidden flex flex-col bg-slate-950 text-slate-100">
+      {/* ── Fatal Error Banner ──────────────────────────────────── */}
+      {showErrorBanner && (
+        <div className="flex items-center gap-3 px-4 py-2.5 bg-red-500/15 border-b border-red-500/30 shrink-0 animate-in fade-in slide-in-from-top-1 duration-300">
+          <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+          <span className="flex-1 text-sm text-red-200 font-medium">
+            {error}
+          </span>
+          <button
+            onClick={() => setDismissed(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-red-300 hover:text-white bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 transition-colors"
+          >
+            <X className="w-3 h-3" />
+            Dismiss
+          </button>
+        </div>
+      )}
       <Header />
       <main className="flex flex-1 min-h-0">
         <PanelGroup direction="horizontal" autoSaveId="main-horizontal">

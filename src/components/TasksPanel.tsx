@@ -30,6 +30,46 @@ interface QaRetryState {
   status: 'failed' | 'retrying' | 'passed';
   failingCommand: string | null;
   defectSummary: string | null;
+  scores: Record<string, number> | null;
+  failingDimensions: string[];
+}
+
+const SCORE_LABELS: Record<string, { label: string; threshold: number }> = {
+  code_quality: { label: 'Code Quality', threshold: 80 },
+  requirements: { label: 'Requirements', threshold: 80 },
+  robustness: { label: 'Robustness', threshold: 70 },
+  security: { label: 'Security', threshold: 90 },
+};
+
+function ScoreBar({ dim, value, isFailing }: { dim: string; value: number; isFailing: boolean }) {
+  const info = SCORE_LABELS[dim] ?? { label: dim, threshold: 70 };
+  const pct = Math.max(0, Math.min(100, value));
+  const barColor = isFailing
+    ? 'bg-red-400'
+    : pct >= info.threshold
+      ? 'bg-emerald-400'
+      : 'bg-amber-400';
+  const textColor = isFailing ? 'text-red-300' : pct >= info.threshold ? 'text-emerald-300' : 'text-amber-300';
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] text-slate-400 w-20 truncate shrink-0">{info.label}</span>
+      <div className="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden relative">
+        {/* Threshold marker */}
+        <div
+          className="absolute top-0 bottom-0 w-px bg-slate-600 z-10"
+          style={{ left: `${info.threshold}%` }}
+        />
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className={`text-[10px] font-mono font-medium w-7 text-right ${textColor}`}>
+        {pct}
+      </span>
+    </div>
+  );
 }
 
 interface TasksPanelProps {
@@ -54,6 +94,8 @@ export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
     'in-progress': tasks.filter((t) => t.status === 'in-progress').length,
     pending: tasks.filter((t) => t.status === 'pending').length,
   };
+
+  const failingSet = new Set(qaRetryState?.failingDimensions ?? []);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -84,30 +126,64 @@ export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
         </div>
       </div>
 
-      {/* ── QA Retry Banner ────────────────────────────────────────── */}
-      {qaRetryState && (qaRetryState.status === 'retrying' || qaRetryState.status === 'failed') && (
-        <div className={`mx-2 mt-2 px-3 py-2 rounded-lg border text-xs ${qaRetryState.status === 'retrying'
-            ? 'bg-amber-500/5 border-amber-500/20 text-amber-300'
-            : 'bg-red-500/5 border-red-500/20 text-red-300'
+      {/* ── QA Retry Banner with Scoreboard ──────────────────────── */}
+      {qaRetryState && (qaRetryState.status === 'retrying' || qaRetryState.status === 'failed' || qaRetryState.status === 'passed') && (
+        <div className={`mx-2 mt-2 rounded-lg border text-xs transition-all duration-300 ${qaRetryState.status === 'passed'
+            ? 'bg-emerald-500/5 border-emerald-500/20 text-emerald-300'
+            : qaRetryState.status === 'retrying'
+              ? 'bg-amber-500/5 border-amber-500/20 text-amber-300'
+              : 'bg-red-500/5 border-red-500/20 text-red-300'
           }`}>
-          <div className="flex items-center gap-2 font-medium">
-            {qaRetryState.status === 'retrying' ? (
+          {/* Header */}
+          <div className="flex items-center gap-2 font-medium px-3 pt-2 pb-1.5">
+            {qaRetryState.status === 'passed' ? (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            ) : qaRetryState.status === 'retrying' ? (
               <RotateCw className="w-3.5 h-3.5 animate-spin" />
             ) : (
               <AlertTriangle className="w-3.5 h-3.5" />
             )}
             <span>
-              QA {qaRetryState.status === 'retrying' ? 'Failed' : 'Failed'} — Attempt {qaRetryState.attempt}/{qaRetryState.maxAttempts}
+              {qaRetryState.status === 'passed'
+                ? `QA Passed — All Checks Clear`
+                : `QA Failed — Attempt ${qaRetryState.attempt}/${qaRetryState.maxAttempts}`}
               {qaRetryState.status === 'retrying' && ' — Dev Retrying'}
             </span>
           </div>
+
+          {/* Dimensional Scoreboard */}
+          {qaRetryState.scores && (
+            <div className="mx-3 mb-2 px-2.5 py-2 rounded-md bg-slate-950/60 border border-slate-800/50 space-y-1.5">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="text-[9px] font-semibold text-slate-500 uppercase tracking-widest">QA Scores</span>
+                {qaRetryState.status === 'passed' ? (
+                  <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                    all passing
+                  </span>
+                ) : failingSet.size > 0 && (
+                  <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-red-500/10 border border-red-500/20 text-red-400">
+                    {failingSet.size} below threshold
+                  </span>
+                )}
+              </div>
+              {Object.entries(qaRetryState.scores).map(([dim, value]) => (
+                <ScoreBar
+                  key={dim}
+                  dim={dim}
+                  value={value}
+                  isFailing={failingSet.has(dim)}
+                />
+              ))}
+            </div>
+          )}
+
           {qaRetryState.failingCommand && (
-            <div className="mt-1.5 pl-5.5 font-mono text-[10px] text-slate-400 truncate">
+            <div className="mt-1 px-3 pb-1 font-mono text-[10px] text-slate-400 truncate">
               $ {qaRetryState.failingCommand}
             </div>
           )}
           {qaRetryState.defectSummary && (
-            <div className="mt-1 pl-5.5 text-[10px] text-slate-500 line-clamp-2">
+            <div className="px-3 pb-2 text-[10px] text-slate-500 line-clamp-2">
               {qaRetryState.defectSummary}
             </div>
           )}
@@ -122,10 +198,10 @@ export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
             <div key={task.id} className="mb-0.5">
               <div
                 className={`flex items-start gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${isRetrying
-                    ? 'bg-amber-500/5 hover:bg-amber-500/10 ring-1 ring-amber-500/20'
-                    : task.status === 'in-progress'
-                      ? 'bg-sky-500/5 hover:bg-sky-500/10'
-                      : 'hover:bg-slate-800'
+                  ? 'bg-amber-500/5 hover:bg-amber-500/10 ring-1 ring-amber-500/20'
+                  : task.status === 'in-progress'
+                    ? 'bg-sky-500/5 hover:bg-sky-500/10'
+                    : 'hover:bg-slate-800'
                   }`}
                 onClick={() => task.subtasks && toggle(task.id)}
               >
@@ -136,12 +212,12 @@ export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
                   {!isRetrying && task.status === 'pending' && <Circle className="w-3.5 h-3.5 text-slate-600" />}
                 </div>
                 <span className={`flex-1 text-xs leading-relaxed ${isRetrying
-                    ? 'text-amber-200'
-                    : task.status === 'completed'
-                      ? 'text-slate-500 line-through'
-                      : task.status === 'in-progress'
-                        ? 'text-slate-200'
-                        : 'text-slate-400'
+                  ? 'text-amber-200'
+                  : task.status === 'completed'
+                    ? 'text-slate-500 line-through'
+                    : task.status === 'in-progress'
+                      ? 'text-slate-200'
+                      : 'text-slate-400'
                   }`}>
                   {task.label}
                 </span>

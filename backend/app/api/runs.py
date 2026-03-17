@@ -99,33 +99,12 @@ async def get_run_snapshot(
     manager: RunManager = Depends(get_run_manager),
 ) -> dict:
     """
-    Return the current status of a run.
-
-    Tries in-memory first (active run), then falls back to DB
-    (for rehydration after browser refresh or server restart).
+    Return the current status of a run from the DATABASE (single source of truth).
     """
-    # 1. Try in-memory (active run)
-    snapshot = manager.get_run_snapshot(run_id)
-    if snapshot is not None:
-        return {
-            "runId": snapshot["run_id"],
-            "status": snapshot["status"],
-            "phase": snapshot.get("phase"),
-            "progress": snapshot.get("progress", 0),
-            "tasks": snapshot.get("tasks", []),
-        }
-
-    # 2. Fall back to DB
-    from ..db.database import async_session
-    from ..services.run_store import RunStore
-
-    async with async_session() as session:
-        db_snapshot = await RunStore.get_run_snapshot(session, run_id)
-
-    if db_snapshot is None:
+    snapshot = await manager.get_run_snapshot(run_id)
+    if snapshot is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-
-    return db_snapshot
+    return snapshot
 
 
 @router.post("/{run_id}/cancel", response_model=RunCancelResponse)
@@ -137,7 +116,7 @@ async def cancel_run(
     """Cancel an active run."""
 
     reason = body.reason if body else "user_cancelled"
-    result = manager.cancel_run(run_id, reason)
+    result = await manager.cancel_run(run_id, reason)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -166,3 +145,145 @@ async def get_run_metrics(run_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
     return metrics
+
+
+# ─── LLM Connection Test ──────────────────────────────────────────────────────
+
+
+class TestConnectionRequest(BaseModel):
+    provider: str = Field(..., min_length=1)
+    key: str = Field(..., min_length=1)
+    base_url: str | None = Field(default=None, alias="baseUrl")
+
+    model_config = {"populate_by_name": True}
+
+
+class TestConnectionResponse(BaseModel):
+    success: bool
+    message: str
+    provider: str
+
+
+@router.post("/test-connection", response_model=TestConnectionResponse)
+async def test_connection(payload: TestConnectionRequest) -> TestConnectionResponse:
+    """
+    Test an LLM provider connection by making a minimal API call.
+
+    Accepts provider credentials, instantiates a lightweight client,
+    sends a test query, and returns 200 OK or 400 Bad Request.
+    """
+    import httpx
+
+    provider = payload.provider.lower()
+    api_key = payload.key
+
+    # Map providers to their test endpoints and request formats
+    provider_configs: dict[str, dict[str, Any]] = {
+        "openai": {
+            "url": payload.base_url or "https://api.openai.com/v1/chat/completions",
+            "headers": {"Authorization": f"Bearer {api_key}"},
+            "json": {
+                "model": "gpt-3.5-turbo",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+            },
+        },
+        "anthropic": {
+            "url": payload.base_url or "https://api.anthropic.com/v1/messages",
+            "headers": {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            "json": {
+                "model": "claude-3-haiku-20240307",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        },
+        "google": {
+            "url": (
+                payload.base_url
+                or f"https://generativelanguage.googleapis.com/v1beta/models/"
+                   f"gemini-1.5-flash:generateContent?key={api_key}"
+            ),
+            "headers": {},
+            "json": {
+                "contents": [{"parts": [{"text": "Hi"}]}],
+                "generationConfig": {"maxOutputTokens": 1},
+            },
+        },
+        "groq": {
+            "url": payload.base_url or "https://api.groq.com/openai/v1/chat/completions",
+            "headers": {"Authorization": f"Bearer {api_key}"},
+            "json": {
+                "model": "llama-3.1-8b-instant",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+            },
+        },
+        "mistral": {
+            "url": payload.base_url or "https://api.mistral.ai/v1/chat/completions",
+            "headers": {"Authorization": f"Bearer {api_key}"},
+            "json": {
+                "model": "mistral-small-latest",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+            },
+        },
+    }
+
+    # Default: treat unknown providers as OpenAI-compatible
+    config = provider_configs.get(provider, {
+        "url": payload.base_url or "https://api.openai.com/v1/chat/completions",
+        "headers": {"Authorization": f"Bearer {api_key}"},
+        "json": {
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1,
+        },
+    })
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                config["url"],
+                headers=config["headers"],
+                json=config["json"],
+            )
+
+        if resp.status_code in (200, 201):
+            return TestConnectionResponse(
+                success=True,
+                message="API key valid — connection successful.",
+                provider=payload.provider,
+            )
+
+        # Parse error detail from response
+        try:
+            error_body = resp.json()
+            detail = (
+                error_body.get("error", {}).get("message")
+                or error_body.get("message")
+                or resp.text[:200]
+            )
+        except Exception:
+            detail = resp.text[:200]
+
+        return TestConnectionResponse(
+            success=False,
+            message=f"Connection failed ({resp.status_code}): {detail}",
+            provider=payload.provider,
+        )
+
+    except httpx.TimeoutException:
+        return TestConnectionResponse(
+            success=False,
+            message="Connection timed out after 15 seconds.",
+            provider=payload.provider,
+        )
+    except Exception as e:
+        return TestConnectionResponse(
+            success=False,
+            message=f"Connection error: {str(e)}",
+            provider=payload.provider,
+        )

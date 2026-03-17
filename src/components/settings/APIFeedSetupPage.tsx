@@ -16,7 +16,7 @@
 //   const { success, message } = await res.json();
 
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Eye,
   EyeOff,
@@ -30,6 +30,8 @@ import {
   Zap,
   Globe,
   Shield,
+  Settings,
+  Save,
 } from 'lucide-react';
 
 type TestStatus = 'idle' | 'testing' | 'success' | 'error';
@@ -247,14 +249,177 @@ interface CustomEndpoint {
   key: string;
 }
 
+const AGENT_PROVIDERS = [
+  { id: 'openai', name: 'OpenAI' },
+  { id: 'anthropic', name: 'Anthropic' },
+  { id: 'google', name: 'Google AI' },
+  { id: 'openrouter', name: 'OpenRouter' },
+  { id: 'together', name: 'Together.ai' },
+  { id: 'groq', name: 'Groq' },
+  { id: 'mistral', name: 'Mistral' },
+  { id: 'custom', name: 'Custom' },
+];
+
+interface AgentRouting {
+  leaderModel: string;
+  leaderProvider: string;
+  devModel: string;
+  devProvider: string;
+  qaModel: string;
+  qaProvider: string;
+}
+
+function AgentRoutingSection() {
+  const [routing, setRouting] = useState<AgentRouting>({
+    leaderModel: 'gpt-4o',
+    leaderProvider: 'openai',
+    devModel: 'gpt-4o',
+    devProvider: 'openai',
+    qaModel: 'gpt-4o',
+    qaProvider: 'openai',
+  });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
+    if (!apiBase) return;
+    fetch(`${apiBase}/api/settings/llm`)
+      .then((res) => res.json())
+      .then((data: AgentRouting) => setRouting(data))
+      .catch(() => { });
+  }, []);
+
+  const saveRouting = useCallback(async () => {
+    const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
+    if (!apiBase) return;
+    setSaving(true);
+    try {
+      await fetch(`${apiBase}/api/settings/llm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(routing),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch { /* ignore */ }
+    setSaving(false);
+  }, [routing]);
+
+  const roles: Array<{ key: string; label: string; modelKey: keyof AgentRouting; providerKey: keyof AgentRouting; desc: string }> = [
+    { key: 'leader', label: 'Leader (Tech Lead)', modelKey: 'leaderModel', providerKey: 'leaderProvider', desc: 'Plans and decomposes goals into tasks' },
+    { key: 'dev', label: 'Dev (Developer)', modelKey: 'devModel', providerKey: 'devProvider', desc: 'Writes and patches code via MCP tools' },
+    { key: 'qa', label: 'QA (Quality Assurance)', modelKey: 'qaModel', providerKey: 'qaProvider', desc: 'Runs linters, compilers, and verifies output' },
+  ];
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h3 className="flex items-center gap-2 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+          <Settings className="w-3 h-3" />
+          Agent Model Routing
+        </h3>
+        <button
+          onClick={saveRouting}
+          disabled={saving}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-medium transition-colors"
+        >
+          {saving ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : saved ? (
+            <CheckCircle2 className="w-3 h-3" />
+          ) : (
+            <Save className="w-3 h-3" />
+          )}
+          {saving ? 'Saving...' : saved ? 'Saved!' : 'Save routing'}
+        </button>
+      </div>
+
+      <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-md bg-violet-500/5 border border-violet-500/20">
+        <Info className="w-3.5 h-3.5 text-violet-400 shrink-0 mt-0.5" />
+        <p className="text-[11px] text-violet-300/80 leading-relaxed">
+          Assign a specific LLM model and provider to each agent role. Each agent can use a different provider simultaneously.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {roles.map((role) => (
+          <div key={role.key} className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
+            <div className="flex items-center gap-2 mb-1">
+              <div className="w-2 h-2 rounded-full bg-violet-400 shrink-0" />
+              <span className="text-sm font-medium text-slate-200">{role.label}</span>
+            </div>
+            <p className="text-[10px] text-slate-500 mb-2.5 ml-4">{role.desc}</p>
+            <div className="grid grid-cols-2 gap-2 ml-4">
+              <div>
+                <label className="text-[10px] text-slate-500 uppercase tracking-wide mb-1 block">Provider</label>
+                <select
+                  value={routing[role.providerKey] as string}
+                  onChange={(e) => setRouting((p) => ({ ...p, [role.providerKey]: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-sky-500/60 transition-colors appearance-none cursor-pointer"
+                >
+                  {AGENT_PROVIDERS.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] text-slate-500 uppercase tracking-wide mb-1 block">Model</label>
+                <input
+                  type="text"
+                  value={routing[role.modelKey] as string}
+                  onChange={(e) => setRouting((p) => ({ ...p, [role.modelKey]: e.target.value }))}
+                  placeholder="e.g. gpt-4o, claude-3.5-sonnet"
+                  className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-300 placeholder:text-slate-600 font-mono focus:outline-none focus:border-sky-500/60 transition-colors"
+                />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function APIFeedSetupPage() {
   const [entries, setEntries] = useState<Record<string, ApiEntry>>({});
   const [customEndpoints, setCustomEndpoints] = useState<CustomEndpoint[]>([]);
   const [showAddCustom, setShowAddCustom] = useState(false);
   const [newEndpoint, setNewEndpoint] = useState({ name: '', baseUrl: '', key: '' });
 
-  const updateKey = (providerId: string, key: string) => {
+  // Load configured providers from backend vault on mount
+  useState(() => {
+    const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
+    if (!apiBase) return;
+
+    fetch(`${apiBase}/api/settings/keys`)
+      .then((res) => res.json())
+      .then((keys: Array<{ provider: string; maskedKey: string }>) => {
+        const loaded: Record<string, ApiEntry> = {};
+        for (const k of keys) {
+          loaded[k.provider] = {
+            providerId: k.provider,
+            key: k.maskedKey, // Display masked key, never the real one
+            testStatus: 'success' as TestStatus,
+            testMessage: 'Key stored securely on server',
+          };
+        }
+        setEntries(loaded);
+      })
+      .catch(() => {
+        // Backend not available — degrade gracefully
+      });
+  });
+
+  const updateKey = async (providerId: string, key: string) => {
     if (!key) {
+      // Remove from backend vault
+      const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
+      if (apiBase) {
+        try {
+          await fetch(`${apiBase}/api/settings/keys/${providerId}`, { method: 'DELETE' });
+        } catch { /* ignore */ }
+      }
       setEntries((p) => {
         const next = { ...p };
         delete next[providerId];
@@ -262,6 +427,34 @@ export function APIFeedSetupPage() {
       });
       return;
     }
+
+    // Persist to backend vault (encrypted)
+    const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
+    if (apiBase) {
+      try {
+        const res = await fetch(`${apiBase}/api/settings/keys`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: providerId, key }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          // Store only the masked key — real key is now on the server
+          setEntries((p) => ({
+            ...p,
+            [providerId]: {
+              providerId,
+              key: key.slice(0, 8) + '•'.repeat(Math.min(key.length - 8, 20)),
+              testStatus: 'idle',
+              testMessage: 'Key stored securely',
+            },
+          }));
+          return;
+        }
+      } catch { /* fall through to local-only */ }
+    }
+
+    // Fallback: local-only (no backend)
     setEntries((p) => ({
       ...p,
       [providerId]: { providerId, key, testStatus: 'idle', testMessage: '' },
@@ -281,7 +474,7 @@ export function APIFeedSetupPage() {
       }
 
       const entry = entries[providerId];
-      const res = await fetch(`${apiBase}/api/test-connection`, {
+      const res = await fetch(`${apiBase}/api/runs/test-connection`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider: providerId, key: entry?.key }),
@@ -388,6 +581,8 @@ export function APIFeedSetupPage() {
             />
           ))}
         </div>
+
+        <AgentRoutingSection />
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">

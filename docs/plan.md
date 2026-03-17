@@ -703,7 +703,7 @@ The QA agent should emit `DefectReport` objects, and the Dev agent should consum
 
 ## 4. Implementation Phases
 
-## Phase 1: Frontend Refactoring
+## Phase 1: Frontend Refactoring — ✅ DELIVERED
 
 ### Goal
 
@@ -740,7 +740,7 @@ Replace simulation-centric state with transport-centric state while preserving t
 - This phase is mostly plumbing and data shape work, not visual redesign.
 - The existing hook abstraction is the biggest frontend asset in this repo.
 
-## Phase 2: Backend Setup
+## Phase 2: Backend Setup — ✅ DELIVERED
 
 ### Goal
 

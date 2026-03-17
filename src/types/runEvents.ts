@@ -373,6 +373,8 @@ export interface QaReportData {
   rawLogTail: string[];
   errors: QaReportIssue[];
   retryable: boolean;
+  scores?: Record<string, number>;
+  failingDimensions?: string[];
 }
 
 /**
@@ -394,6 +396,7 @@ export interface QaPassedData {
     exitCode: number;
   }>;
   summary: string;
+  scores?: Record<string, number>;
 }
 
 export type ConnectionReadyEvent = RunEventEnvelope<'connection:ready', ConnectionReadyData>;

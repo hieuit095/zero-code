@@ -1,17 +1,8 @@
 // @ai-module: Settings — Agent Setup Page
 // @ai-role: Settings panel for configuring per-agent AI model selection and system prompt editing.
-//           All state is local (useState) — model and prompt selections are not yet persisted to any store or backend.
+//           Model and prompt state is persisted via useSettingsStore (Zustand + localStorage).
 //           Provides lock/unlock toggle to protect prompts from accidental edits, reset-to-default, and Modified badge.
-// @ai-dependencies: types/index.ts (AgentRole)
-
-// [AI-STRICT] All settings state here is LOCAL and ephemeral — changes are lost on page refresh.
-//             When implementing persistence:
-//             1. Create a settingsStore (Zustand + localStorage middleware) for model and prompt selections.
-//             2. Initialize state from the store and write back on change.
-//             3. Or persist to Supabase if per-user settings are needed.
-// @ai-integration-point: When the real backend is connected, model selections must be sent to the
-//   backend on save so agents are initialized with the correct model IDs.
-//   Expected payload: { type: "config:update", agentConfigs: { "tech-lead": { model, systemPrompt }, ... } }
+// @ai-dependencies: types/index.ts (AgentRole), stores/settingsStore.ts (useSettingsStore)
 
 
 import { useState } from 'react';
@@ -28,6 +19,7 @@ import {
   TestTube2,
 } from 'lucide-react';
 import type { AgentRole } from '../../types';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 interface ModelOption {
   id: string;
@@ -145,9 +137,8 @@ function ModelDropdown({
               <button
                 key={m.id}
                 onClick={() => { onChange(m.id); setOpen(false); }}
-                className={`flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-slate-800 transition-colors ${
-                  value === m.id ? 'bg-sky-500/10' : ''
-                }`}
+                className={`flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-slate-800 transition-colors ${value === m.id ? 'bg-sky-500/10' : ''
+                  }`}
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5">
@@ -212,11 +203,10 @@ function AgentCard({
           <button
             onClick={onToggleLock}
             title={locked ? 'Unlock to edit' : 'Lock prompt'}
-            className={`p-1.5 rounded transition-colors ${
-              locked
-                ? 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/40'
-                : 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10'
-            }`}
+            className={`p-1.5 rounded transition-colors ${locked
+              ? 'text-slate-500 hover:text-slate-300 hover:bg-slate-700/40'
+              : 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10'
+              }`}
           >
             {locked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
           </button>
@@ -247,11 +237,10 @@ function AgentCard({
             onChange={(e) => onPromptChange(e.target.value)}
             disabled={locked}
             rows={5}
-            className={`w-full bg-slate-950 border rounded-md px-3 py-2 text-xs text-slate-300 leading-relaxed resize-y focus:outline-none transition-colors placeholder:text-slate-600 ${
-              locked
-                ? 'border-slate-800 opacity-60 cursor-not-allowed'
-                : 'border-slate-700 focus:border-sky-500/60'
-            }`}
+            className={`w-full bg-slate-950 border rounded-md px-3 py-2 text-xs text-slate-300 leading-relaxed resize-y focus:outline-none transition-colors placeholder:text-slate-600 ${locked
+              ? 'border-slate-800 opacity-60 cursor-not-allowed'
+              : 'border-slate-700 focus:border-sky-500/60'
+              }`}
           />
           {locked && (
             <p className="flex items-center gap-1 mt-1.5 text-[10px] text-slate-600">
@@ -266,29 +255,23 @@ function AgentCard({
 }
 
 export function AgentSetupPage() {
-  const [models, setModels] = useState<Record<AgentRole, string>>({
-    'tech-lead': 'gpt-4o',
-    dev: 'gpt-4o',
-    qa: 'gpt-4o-mini',
-  });
-  const [prompts, setPrompts] = useState<Record<AgentRole, string>>(
-    Object.fromEntries(AGENT_CONFIGS.map((c) => [c.role, c.defaultPrompt])) as Record<AgentRole, string>
-  );
+  const agentModels = useSettingsStore((s) => s.agentModels);
+  const setAgentModel = useSettingsStore((s) => s.setAgentModel);
+  const setAgentSystemPrompt = useSettingsStore((s) => s.setAgentSystemPrompt);
+
   const [locked, setLocked] = useState<Record<AgentRole, boolean>>({
     'tech-lead': true,
     dev: true,
     qa: true,
   });
 
-  const setModel = (role: AgentRole, model: string) =>
-    setModels((p) => ({ ...p, [role]: model }));
-  const setPrompt = (role: AgentRole, prompt: string) =>
-    setPrompts((p) => ({ ...p, [role]: prompt }));
+  const setModel = (role: AgentRole, model: string) => setAgentModel(role, model);
+  const setPrompt = (role: AgentRole, prompt: string) => setAgentSystemPrompt(role, prompt);
   const toggleLock = (role: AgentRole) =>
     setLocked((p) => ({ ...p, [role]: !p[role] }));
   const resetPrompt = (role: AgentRole) => {
     const cfg = AGENT_CONFIGS.find((c) => c.role === role)!;
-    setPrompts((p) => ({ ...p, [role]: cfg.defaultPrompt }));
+    setAgentSystemPrompt(role, cfg.defaultPrompt);
   };
 
   return (
@@ -312,8 +295,8 @@ export function AgentSetupPage() {
           <AgentCard
             key={cfg.role}
             config={cfg}
-            model={models[cfg.role]}
-            prompt={prompts[cfg.role]}
+            model={agentModels[cfg.role].model}
+            prompt={agentModels[cfg.role].systemPrompt ?? AGENT_CONFIGS.find((c) => c.role === cfg.role)!.defaultPrompt}
             locked={locked[cfg.role]}
             onModelChange={(m) => setModel(cfg.role, m)}
             onPromptChange={(p) => setPrompt(cfg.role, p)}

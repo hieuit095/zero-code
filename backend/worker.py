@@ -8,6 +8,10 @@ the orchestration loop (Leader → Dev → QA).
 Run with:
     python -m worker
 
+ARCHITECTURE FIX: The worker no longer manually hydrates an in-memory
+`_runs` dict. The RunManager is now fully DB-backed, so both this worker
+and the FastAPI API server share the same source of truth.
+
 Rule 2: FastAPI MUST NOT block on agent execution. This worker does the heavy lifting.
 Rule 3: Redis connection is opened on startup, closed on shutdown.
 """
@@ -22,6 +26,7 @@ import sys
 # Ensure app package is importable
 sys.path.insert(0, ".")
 
+from app.config import get_settings
 from app.db.database import init_db
 from app.orchestrator.run_manager import get_run_manager
 from app.services.event_broker import get_event_broker
@@ -80,12 +85,33 @@ async def process_run(run_id: str) -> None:
                 "CRITICAL: Failed to record FAILED status for run %s in DB", run_id
             )
 
+        # ── AUDIT FIX: Broadcast run:error to Redis so the frontend ──
+        # breaks out of its loading state. Without this, the React UI
+        # would spin indefinitely because no WebSocket event is sent.
+        try:
+            broker = get_event_broker()
+            await broker.publish(run_id, "run:error", {
+                "status": "failed",
+                "errorCode": "WORKER_CRASH",
+                "message": f"Worker process crashed: {type(exc).__name__}: {exc}",
+                "lastKnownTaskId": None,
+            })
+            logger.info("Emitted run:error event for crashed run %s", run_id)
+        except Exception:
+            logger.exception(
+                "CRITICAL: Failed to emit run:error for crashed run %s", run_id
+            )
+
 
 async def main() -> None:
     """Main worker loop: connect, poll Redis queue, execute runs."""
 
     # ── Startup ──────────────────────────────────────────────
     logger.info("Worker starting up...")
+
+    # Validate required secrets (same check as the API server)
+    settings = get_settings()
+    settings.validate_required_secrets()
 
     # Initialize DB (creates tables if needed)
     await init_db()
@@ -106,35 +132,15 @@ async def main() -> None:
                 if run_id is None:
                     continue  # Timeout — loop back and check shutdown
 
-                # Load run from in-memory manager or create from DB
+                # Verify the run exists in the DB before executing
                 manager = get_run_manager()
-                if manager.get_run_snapshot(run_id) is None:
-                    # Run was created by the API process — reload from DB
-                    from app.db.database import async_session
-                    from app.services.run_store import RunStore
+                snapshot = await manager.get_run_snapshot(run_id)
 
-                    async with async_session() as session:
-                        snapshot = await RunStore.get_run_snapshot(session, run_id)
+                if snapshot is None:
+                    logger.error("Run %s not found in DB — skipping", run_id)
+                    continue
 
-                    if snapshot is None:
-                        logger.error("Run %s not found in DB — skipping", run_id)
-                        continue
-
-                    # Hydrate into the manager's in-memory state
-                    manager._runs[run_id] = {
-                        "run_id": run_id,
-                        "goal": snapshot["goal"],
-                        "workspace_id": snapshot.get("workspaceId", "repo-main"),
-                        "status": snapshot.get("status", "queued"),
-                        "phase": snapshot.get("phase"),
-                        "progress": snapshot.get("progress", 0),
-                        "tasks": [],
-                        "files_changed": [],
-                        "started_at": None,
-                        "finished_at": None,
-                    }
-
-                # Execute the run
+                # Execute the run (RunManager reads all state from DB)
                 await process_run(run_id)
 
             except asyncio.CancelledError:

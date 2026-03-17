@@ -1,11 +1,14 @@
 """
-Leader Agent — Tech Lead / Planner Nanobot.
+Leader Agent — Tech Lead / Planner Nanobot (OpenHands SDK).
 
 Responsibilities:
 - Receives the raw user goal and workspace context
-- Analyzes the existing codebase via read-only MCP tools (list_tree, read_file)
+- Analyzes the existing codebase via read-only tools (terminal, file editor)
 - Decomposes the goal into a structured JSON array of sequential tasks
 - NEVER writes code — planning and delegation only (Rule 1)
+
+ARCHITECTURE: Uses the OpenHands SDK Conversation lifecycle:
+  LLM → Agent(tools) → Conversation(agent, workspace) → send_message → run()
 
 Output:
   A JSON array of AgentTask objects, each with:
@@ -15,11 +18,36 @@ Output:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from .mcp_tools import mcp_exec, mcp_read_file
+from pydantic import SecretStr
+
+from ..config import get_settings
+
+logger = logging.getLogger(__name__)
+
+# ─── SDK Import Guard ─────────────────────────────────────────────────────────
+
+_SDK_AVAILABLE = False
+
+try:
+    from openhands.sdk import (
+        LLM,
+        Agent,
+        Conversation,
+        Event,
+        LLMConvertibleEvent,
+    )
+    from openhands.sdk.context.condenser import LLMSummarizingCondenser
+    _SDK_AVAILABLE = True
+except ImportError:
+    logger.warning(
+        "OpenHands SDK not installed — LeaderAgent will operate in degraded stub mode. "
+        "Install with: pip install openhands-sdk openhands-tools"
+    )
 
 # ─── System Prompt ────────────────────────────────────────────────────────────
 
@@ -30,15 +58,15 @@ You are **Tech Lead**, the planning agent in a multi-agent coding IDE.
 You receive a user's high-level coding goal and decompose it into a sequence
 of concrete, implementable tasks for the Dev agent. You DO NOT write code.
 
-## Available Tools (MCP Facade — Read-Only)
-1. **read_file(path)** → inspect existing file content
-2. **exec(command)** → run read-only commands (e.g., `find`, `ls`, `tree`, `cat`)
+## Available Tools
+1. **execute_bash(command)** — run read-only commands (e.g., `find`, `ls`, `tree`, `cat`)
+2. **str_replace_editor** — inspect existing file content (view mode only)
 
 You may use these to understand the existing workspace structure before planning.
 
 ## Planning Process
 1. Analyze the user's goal carefully.
-2. Optionally inspect the workspace to understand existing code structure.
+2. Inspect the workspace to understand existing code structure.
 3. Break the goal into 2–5 sequential tasks. Each task should be:
    - Small enough for one Dev agent iteration
    - Independent enough to be verified by the QA agent after completion
@@ -63,10 +91,49 @@ Output EXACTLY a JSON array (no markdown fences, no extra text):
 ## Rules
 - Output 2–5 tasks. Never more than 5, never fewer than 2.
 - Each task label should be action-oriented (e.g., "Create user model", not "User model").
-- Acceptance criteria must be specific and verifiable (e.g., "File user.py exists and contains a User class with name and email fields").
-- You MUST NOT include implementation details in your output — only WHAT to build, not HOW.
+- Acceptance criteria must be specific and verifiable.
+- You MUST NOT include implementation details — only WHAT to build, not HOW.
 - You MUST NOT write any code or modify any files.
 - Output ONLY the JSON array. No preamble, no explanation, no markdown.
+"""
+
+# ─── Mentorship Mode Prompt ───────────────────────────────────────────────────
+
+LEADER_MENTORSHIP_PROMPT = """\
+You are **Tech Lead**, acting as a senior architectural debugger.
+
+## Context
+The Dev agent has FAILED to implement a task after 2 attempts. The QA agent
+has generated a detailed critique at `/workspace/critique_report.md`. Your
+job is to rescue this task by providing targeted, authoritative guidance.
+
+## Available Tools
+1. **execute_bash(command)** — run read-only commands (e.g., `cat`, `find`, `ls`)
+2. **str_replace_editor** — inspect existing file content (view mode only)
+
+## Your Process
+1. Read `/workspace/critique_report.md` to understand the QA failures.
+2. Inspect the broken source files referenced in the critique.
+3. Identify the ROOT CAUSE — is it a logic error, a missing import,
+   an architectural misunderstanding, or a wrong API usage?
+4. Write a concise, step-by-step fix plan that the Dev agent can follow.
+
+## Output Format
+Output your guidance as plain Markdown. Structure it as:
+
+### Diagnosis
+Brief root cause analysis (2–3 sentences).
+
+### Fix Steps
+1. Step one…
+2. Step two…
+3. …
+
+## Rules
+- You MUST NOT write code or modify any files.
+- You MUST NOT output JSON task arrays.
+- Be specific — reference exact file paths and function names.
+- Keep guidance concise (under 500 words).
 """
 
 # ─── Data Structures ─────────────────────────────────────────────────────────
@@ -114,115 +181,200 @@ def _task_id() -> str:
 
 class LeaderAgent:
     """
-    Leader agent that decomposes a goal into structured tasks.
-
-    The agent is invoked by the orchestrator before the Dev→QA loop begins.
-    It uses read-only MCP tools to analyze the workspace, then outputs
-    a JSON array of tasks.
+    Leader agent that decomposes a goal into structured tasks
+    via the OpenHands SDK Conversation lifecycle.
     """
 
     def __init__(self, config: LeaderAgentConfig | None = None) -> None:
         self.config = config or LeaderAgentConfig()
+        self._last_llm: Any = None  # Exposed for SDK metrics extraction
 
     async def run(
         self,
         run_id: str,
         goal: str,
         context: dict[str, Any] | None = None,
+        llm_config: dict[str, Any] | None = None,
+        mentorship_mode: bool = False,
     ) -> LeaderAgentResult:
         """
         Execute the Leader agent for goal decomposition.
 
         Args:
-            run_id: The current run ID (used for MCP X-Run-Id scoping)
+            run_id: The current run ID
             goal: The user's high-level goal
             context: Optional workspace context
+            llm_config: Dynamic LLM configuration from the database:
+                        {"model": str, "provider": str, "api_key": str, "base_url": str | None}
 
         Returns:
             LeaderAgentResult with a list of AgentTask objects.
-
-        @ai-integration-point: Replace this stub with real LLM-backed planning.
-        The conversation should use LEADER_SYSTEM_PROMPT, receive the goal,
-        optionally call read_file/exec to inspect the workspace, and output
-        the structured JSON task array.
         """
+        if not _SDK_AVAILABLE:
+            return LeaderAgentResult(
+                status="error",
+                summary="OpenHands SDK is not installed. Cannot run Leader agent.",
+                error="SDK_NOT_AVAILABLE",
+            )
+
         try:
-            # ── Stub: Generate 2–3 tasks from the goal ────────────────
-            # In production, the LLM will analyze the goal + workspace
-            # and produce a real task decomposition.
+            # ── Build LLM from dynamic config ──────────────────────────
+            cfg = llm_config or {}
+            model = cfg.get("model", "gpt-4o")
+            provider = cfg.get("provider", "openai")
+            api_key = cfg.get("api_key", "")
+            base_url = cfg.get("base_url")
 
-            # Optionally inspect workspace (demonstrates read-only MCP usage)
-            try:
-                listing = await mcp_exec(run_id, "dir /b" if _is_windows() else "ls -la")
-                workspace_info = listing.get("stdout", "").strip()
-            except Exception:
-                workspace_info = "(unable to inspect workspace)"
+            llm_model = f"{provider}/{model}" if "/" not in model else model
 
-            # Generate stub tasks based on goal keywords
-            tasks = self._decompose_goal(goal, workspace_info)
+            llm = LLM(
+                model=llm_model,
+                api_key=SecretStr(api_key) if api_key else None,
+                base_url=base_url,
+                usage_id=f"leader-{run_id}",
+            )
+            self._last_llm = llm  # Expose for metrics extraction
+
+            # ── Context Condenser (prevents token explosion on replans) ─
+            llm_condenser = llm.model_copy(update={"usage_id": f"leader-condenser-{run_id}"})
+            condenser = LLMSummarizingCondenser(
+                llm=llm_condenser, max_size=10, keep_first=2,
+            )
+
+            # ── Select system prompt based on mode ───────────────────
+            active_prompt = (
+                LEADER_MENTORSHIP_PROMPT if mentorship_mode
+                else self.config.system_prompt
+            )
+
+            # ── Create Agent with MCP Facade tools + condenser ────────
+            # PHASE 2: Tools are discovered via the internal MCP server,
+            # NOT via native SDK ToolDefinition bindings.
+            settings = get_settings()
+            mcp_config = {
+                "mcpServers": {
+                    "sandbox": {
+                        "url": f"http://127.0.0.1:{settings.port}/internal/mcp/tech-lead/sse",
+                    },
+                    "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
+                }
+            }
+
+            agent = Agent(
+                llm=llm,
+                system_prompt=active_prompt,
+                condenser=condenser,
+                mcp_config=mcp_config,
+            )
+
+            # ── Resolve workspace path ─────────────────────────────────
+            settings = get_settings()
+            workspace_path = str(settings.workspace_path / "repo-main")
+
+            # ── Collect LLM messages via callback ──────────────────────
+            llm_messages: list[Any] = []
+
+            def _on_event(event: Event) -> None:
+                if isinstance(event, LLMConvertibleEvent):
+                    llm_messages.append(event.to_llm_message())
+
+            # ── Start Conversation lifecycle ───────────────────────────
+            conversation = Conversation(
+                agent=agent,
+                callbacks=[_on_event],
+                workspace=workspace_path,
+            )
+
+            user_message = (
+                f"[Run: {run_id}]\n\n"
+                f"Goal:\n{goal}"
+            )
+
+            conversation.send_message(user_message)
+            conversation.run()
+
+            # ── Extract structured result from LLM output ──────────────
+            raw_output = ""
+            if llm_messages:
+                for msg in reversed(llm_messages):
+                    content = str(msg) if msg else ""
+                    if content.strip():
+                        raw_output = content
+                        break
+
+            # ── Mentorship mode: return raw guidance, skip JSON parsing ─
+            if mentorship_mode:
+                return LeaderAgentResult(
+                    status="done",
+                    tasks=[],
+                    summary="Mentorship complete",
+                    raw_output=raw_output,
+                )
+
+            return self._parse_result(raw_output)
+
+        except Exception as e:
+            logger.exception("LeaderAgent.run() failed for run %s", run_id)
+            return LeaderAgentResult(
+                status="error",
+                summary=f"Leader agent failed during planning: {e}",
+                error=str(e),
+            )
+
+    def _parse_result(self, raw_output: str) -> LeaderAgentResult:
+        """
+        Parse the LLM's raw output into a LeaderAgentResult.
+
+        Expects a JSON array of task objects. Falls back to generating
+        a minimal task list if parsing fails completely.
+        """
+        # Try to extract a JSON array from the output
+        json_str = raw_output
+
+        # Strip markdown fences if present
+        if "```json" in json_str:
+            start = json_str.index("```json") + 7
+            end = json_str.index("```", start)
+            json_str = json_str[start:end].strip()
+        elif "```" in json_str:
+            start = json_str.index("```") + 3
+            end = json_str.index("```", start)
+            json_str = json_str[start:end].strip()
+
+        # Find the JSON array boundaries
+        bracket_start = json_str.find("[")
+        bracket_end = json_str.rfind("]")
+        if bracket_start != -1 and bracket_end != -1:
+            json_str = json_str[bracket_start : bracket_end + 1]
+
+        try:
+            parsed = json.loads(json_str)
+            if not isinstance(parsed, list) or not parsed:
+                raise ValueError("Expected a non-empty JSON array")
+
+            tasks: list[AgentTask] = []
+            for item in parsed:
+                tasks.append(AgentTask(
+                    id=item.get("id", _task_id()),
+                    label=item.get("label", "Untitled task"),
+                    acceptance_criteria=item.get("acceptanceCriteria", ""),
+                ))
 
             return LeaderAgentResult(
                 status="done",
                 tasks=tasks,
                 summary=f"Decomposed goal into {len(tasks)} tasks.",
-                raw_output=json.dumps(
-                    [{"id": t.id, "label": t.label, "acceptanceCriteria": t.acceptance_criteria}
-                     for t in tasks],
-                    indent=2,
-                ),
+                raw_output=raw_output,
             )
 
-        except Exception as e:
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(
+                "Failed to parse Leader output as JSON: %s. Raw output: %s",
+                e, raw_output[:300],
+            )
             return LeaderAgentResult(
                 status="error",
-                summary="Leader agent failed during planning.",
-                error=str(e),
+                summary=f"Leader agent produced unparseable output: {e}",
+                raw_output=raw_output,
+                error=f"JSON_PARSE_ERROR: {e}",
             )
-
-    def _decompose_goal(self, goal: str, workspace_info: str) -> list[AgentTask]:
-        """
-        Stub task decomposition. Splits the goal into 2–3 concrete tasks.
-        In production, this is replaced by LLM output parsing.
-        """
-        goal_lower = goal.lower()
-
-        # Heuristic: extract action keywords and create tasks
-        tasks: list[AgentTask] = []
-
-        # Task 1: Always start with scaffolding / setup
-        tasks.append(AgentTask(
-            id=_task_id(),
-            label=f"Set up project structure for: {goal[:60]}",
-            acceptance_criteria=(
-                "Project files and directories are created. "
-                "All created files have valid syntax and no import errors."
-            ),
-        ))
-
-        # Task 2: Core implementation
-        tasks.append(AgentTask(
-            id=_task_id(),
-            label=f"Implement core logic: {goal[:60]}",
-            acceptance_criteria=(
-                "Core functionality is implemented as described in the goal. "
-                "All code compiles/parses without errors."
-            ),
-        ))
-
-        # Task 3: If the goal mentions testing, UI, or API — add a third task
-        if any(kw in goal_lower for kw in ("test", "api", "ui", "form", "page", "endpoint", "route")):
-            tasks.append(AgentTask(
-                id=_task_id(),
-                label=f"Add integration layer for: {goal[:50]}",
-                acceptance_criteria=(
-                    "Integration code connects the core logic to the target surface "
-                    "(API route, UI component, or test suite). No runtime errors."
-                ),
-            ))
-
-        return tasks
-
-
-def _is_windows() -> bool:
-    import sys
-    return sys.platform == "win32"

@@ -3,6 +3,7 @@
 //           agent status indicator, and the Settings gear icon that opens SettingsModal.
 //           Also hosts the SettingsModal component itself (rendered at the header level so it portals correctly).
 // @ai-dependencies: hooks/useRunConnection.ts (startRun, disconnect, runStatus, runProgress)
+//                   stores/settingsStore.ts (getAgentConfig — injected into run payload)
 //                   components/settings/SettingsModal.tsx (modal shell)
 
 // [AI-STRICT] The "Generate" / goal input workflow is mock-only scaffolding (setIsGenerating with a 2-second timeout).
@@ -22,6 +23,7 @@ import { useState } from 'react';
 import { Bot, Sparkles, Settings, ChevronDown, Zap, RotateCcw } from 'lucide-react';
 import { useRunConnection } from '../hooks/useRunConnection';
 import { useAgentStore } from '../stores/agentStore';
+import { useSettingsStore } from '../stores/settingsStore';
 import { SettingsModal } from './settings/SettingsModal';
 import type { SettingsTab } from './settings/SettingsModal';
 
@@ -29,18 +31,30 @@ export function Header() {
   const [goal, setGoal] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('agent-setup');
-  const { startRun, disconnect } = useRunConnection();
+  const { startRun, disconnect, sendMessage, isConnected } = useRunConnection();
   const runStatus = useAgentStore((s) => s.runStatus);
   const progress = useAgentStore((s) => s.runProgress);
   const resetAgent = useAgentStore((s) => s.resetToInitial);
   const connectionStatus = useAgentStore((s) => s.connectionStatus);
+  const getAgentConfig = useSettingsStore((s) => s.getAgentConfig);
 
   const isRunning = runStatus !== null && runStatus !== 'completed' && runStatus !== 'failed';
 
   const handleGenerate = async () => {
     if (!goal.trim() || isRunning) return;
     try {
-      await startRun({ goal, workspaceId: 'repo-main' });
+      const agentConfig = getAgentConfig();
+
+      // Preferred path: dispatch run:start over WebSocket
+      if (isConnected) {
+        sendMessage({
+          type: 'run:start',
+          data: { goal: goal.trim(), workspaceId: 'repo-main', agentConfig },
+        });
+      } else {
+        // Fallback: REST → WS handshake for cold start
+        await startRun({ goal: goal.trim(), workspaceId: 'repo-main', agentConfig });
+      }
     } catch {
       // Connection error is shown via runConnection state
     }
@@ -150,8 +164,8 @@ export function Header() {
       </header>
       {showDisconnectBanner && (
         <div className={`flex items-center justify-center gap-2 px-4 py-1.5 text-xs font-medium ${connectionStatus === 'reconnecting'
-            ? 'bg-amber-500/15 border-b border-amber-500/30 text-amber-300'
-            : 'bg-red-500/15 border-b border-red-500/30 text-red-300'
+          ? 'bg-amber-500/15 border-b border-amber-500/30 text-amber-300'
+          : 'bg-red-500/15 border-b border-red-500/30 text-red-300'
           }`}>
           <span className={`w-1.5 h-1.5 rounded-full ${connectionStatus === 'reconnecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-400'
             }`} />

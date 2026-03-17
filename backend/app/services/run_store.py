@@ -241,4 +241,45 @@ class RunStore:
             "tasksCompleted": tasks_completed,
             "totalTasks": total_tasks,
             "status": run.status,
+            # ── SDK-native metrics (from sdk:metrics event) ────────────
+            **await RunStore._extract_sdk_metrics(session, run_id),
+        }
+
+    @staticmethod
+    async def _extract_sdk_metrics(
+        session: AsyncSession, run_id: str,
+    ) -> dict[str, Any]:
+        """
+        Extract SDK-native LLM metrics from the 'sdk:metrics' event
+        emitted by `run_manager._persist_sdk_metrics()`.
+
+        Returns a dict with cost/token fields (or empty defaults if
+        no sdk:metrics event exists yet).
+        """
+        result = await session.execute(
+            select(EventLogModel.data)
+            .where(
+                EventLogModel.run_id == run_id,
+                EventLogModel.type == "sdk:metrics",
+            )
+            .order_by(EventLogModel.seq.desc())
+            .limit(1)
+        )
+        row = result.scalar()
+
+        if row is None:
+            return {
+                "accumulatedCost": 0.0,
+                "promptTokens": 0,
+                "completionTokens": 0,
+                "agentMetrics": {},
+            }
+
+        # row is already a dict (JSON column)
+        data = row if isinstance(row, dict) else json.loads(row)
+        return {
+            "accumulatedCost": data.get("totalCost", 0.0),
+            "promptTokens": data.get("totalPromptTokens", 0),
+            "completionTokens": data.get("totalCompletionTokens", 0),
+            "agentMetrics": data.get("agents", {}),
         }

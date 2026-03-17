@@ -1,191 +1,158 @@
 """
 Internal MCP (Model Context Protocol) facade for Nanobot agents.
 
-Security layers:
-  1. JWT authentication via require_mcp_auth (core/security.py)
-  2. Command policy enforcement (services/command_policy.py)
-  3. Audit logging for every operation (db/models.py AuditLogModel)
+PHASE 2 RESTORATION + SECURITY FIX: This module mounts role-scoped FastMCP
+servers on the FastAPI application, providing standardized MCP tool discovery
+for agents.
 
-These endpoints are NOT for the frontend client (Rule 1, Rule 2).
+Each role (dev, qa, tech-lead) gets a dedicated endpoint with its own
+CommandPolicy enforcement:
+  - /internal/mcp/dev/sse       — Dev agent (broader file/exec access)
+  - /internal/mcp/qa/sse        — QA agent (read-only + linting/testing)
+  - /internal/mcp/tech-lead/sse — Tech Lead agent
+
+SECURITY FIX (ALIGNMENT_AUDIT_REPORT §4):
+  router.mount() bypasses FastAPI's dependency injection, so a standard
+  Depends(require_mcp_auth) on the router would NEVER execute for SSE
+  requests hitting the mounted ASGI sub-apps.
+
+  Solution: Each FastMCP SSE app is wrapped in a `JWTAuthMiddleware` —
+  a lightweight ASGI middleware that intercepts every request BEFORE it
+  reaches the FastMCP layer. It:
+    1. Extracts the Authorization Bearer token from the request headers.
+    2. Validates signature, expiry, and purpose via `validate_mcp_token()`.
+    3. Verifies the run is still active in the DATABASE via
+       `_verify_run_is_active()`.
+    4. Returns 401 Unauthorized immediately if any check fails.
+
+  This closes the critical vulnerability where MCP endpoints were
+  completely unauthenticated.
+
+Agents connect to these endpoints via their `mcp_config` to discover
+and invoke sandbox tools (read_file, write_file, exec) through the
+standard MCP protocol.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Header
-from pydantic import BaseModel, Field
+from fastapi import APIRouter
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from ..core.security import require_mcp_auth
-from ..db.database import async_session
-from ..db.models import AuditLogModel
-from ..orchestrator.run_manager import RunManager, get_run_manager
-from ..services.command_policy import CommandPolicy
-from ..services.openhands_client import OpenHandsClient, get_openhands_client
+from ..agents.mcp_tools import create_mcp_server
+from ..config import get_settings
+from ..core.security import validate_mcp_token, _verify_run_is_active
 
-router = APIRouter(prefix="/internal/mcp", tags=["mcp-internal"])
 logger = logging.getLogger(__name__)
 
-
-# ─── Request / Response Models ────────────────────────────────────────────────
-
-
-class MCPReadFileRequest(BaseModel):
-    path: str = Field(..., description="File path relative to workspace root")
+router = APIRouter(prefix="/internal/mcp", tags=["mcp-internal"])
 
 
-class MCPReadFileResponse(BaseModel):
-    path: str
-    content: str
-    workspace_id: str = Field(alias="workspaceId")
-
-    model_config = {"populate_by_name": True}
+# ─── JWT Authentication ASGI Middleware ───────────────────────────────────────
 
 
-class MCPWriteFileRequest(BaseModel):
-    path: str = Field(..., description="File path relative to workspace root")
-    content: str
+class JWTAuthMiddleware:
+    """
+    ASGI middleware that enforces JWT Bearer authentication on every
+    request before forwarding to the wrapped FastMCP SSE application.
+
+    Because router.mount() injects raw ASGI sub-apps that bypass
+    FastAPI's Depends() system entirely, this middleware is the ONLY
+    enforcement point for MCP endpoint authentication.
+
+    Validation chain:
+      1. Extract `Authorization: Bearer <token>` header.
+      2. Decode and validate JWT (signature, expiry, purpose claim).
+      3. Verify the run_id from the token is active in PostgreSQL.
+      4. If any step fails → 401 Unauthorized (JSON body).
+      5. If all pass → forward request to the inner ASGI app.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Only gate HTTP and WebSocket requests; let lifespan pass through.
+        if scope["type"] not in ("http", "websocket"):
+            await self._app(scope, receive, send)
+            return
+
+        # ── Extract Bearer token from headers ─────────────────────────
+        headers = dict(scope.get("headers", []))
+        auth_value = headers.get(b"authorization", b"").decode("utf-8", errors="ignore")
+
+        if not auth_value.lower().startswith("bearer "):
+            await self._send_401(send, "MCP facade requires a valid Bearer token. No token provided.")
+            return
+
+        token = auth_value[7:].strip()
+        if not token:
+            await self._send_401(send, "MCP facade requires a valid Bearer token. Token is empty.")
+            return
+
+        # ── Validate JWT (signature, expiry, purpose) ─────────────────
+        try:
+            payload = validate_mcp_token(token)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            await self._send_401(send, f"JWT validation failed: {detail}")
+            return
+
+        # ── Verify run is active in DATABASE ──────────────────────────
+        run_id = payload.get("sub", "")
+        try:
+            await _verify_run_is_active(run_id)
+        except Exception as exc:
+            detail = getattr(exc, "detail", str(exc))
+            await self._send_401(send, f"Run validation failed: {detail}")
+            return
+
+        # ── All checks passed — forward to inner FastMCP app ─────────
+        await self._app(scope, receive, send)
+
+    @staticmethod
+    async def _send_401(send: Send, detail: str) -> None:
+        """Send a minimal 401 Unauthorized JSON response."""
+        body = json.dumps({"detail": detail}).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                [b"content-type", b"application/json"],
+                [b"content-length", str(len(body)).encode()],
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": body,
+        })
 
 
-class MCPWriteFileResponse(BaseModel):
-    path: str
-    success: bool
-    workspace_id: str = Field(alias="workspaceId")
+# ─── Mount Role-Scoped MCP Servers (JWT-Protected) ───────────────────────────
 
-    model_config = {"populate_by_name": True}
+_settings = get_settings()
+_workspace_root = str(_settings.workspace_path / "repo-main")
 
+# Each role gets its own FastMCP server with appropriate CommandPolicy scoping.
+# The `.sse_app()` method returns a Starlette ASGI app that handles the
+# MCP SSE transport protocol.
 
-class MCPExecRequest(BaseModel):
-    command: str
-    cwd: str = "/workspace"
-    agent_role: str = Field(default="dev", alias="agentRole")
+_dev_mcp = create_mcp_server(_workspace_root, role="dev")
+_qa_mcp = create_mcp_server(_workspace_root, role="qa")
+_lead_mcp = create_mcp_server(_workspace_root, role="tech-lead")
 
-    model_config = {"populate_by_name": True}
+# SECURITY FIX: Wrap each SSE app in JWTAuthMiddleware before mounting.
+# Every request to /internal/mcp/{role}/... must present a valid Bearer
+# token scoped to an active run, or receive an immediate 401.
+router.mount("/dev", app=JWTAuthMiddleware(_dev_mcp.sse_app()))
+router.mount("/qa", app=JWTAuthMiddleware(_qa_mcp.sse_app()))
+router.mount("/tech-lead", app=JWTAuthMiddleware(_lead_mcp.sse_app()))
 
-
-class MCPExecResponse(BaseModel):
-    exit_code: int = Field(alias="exitCode")
-    stdout: str
-    stderr: str
-    duration_ms: int = Field(alias="durationMs")
-
-    model_config = {"populate_by_name": True}
-
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-
-def _resolve_workspace_id(
-    run_id: str,
-    manager: RunManager,
-) -> str:
-    """Extract workspace_id from a run. Raises 404 if run not found."""
-    snapshot = manager.get_run_snapshot(run_id)
-    if snapshot is None:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    return snapshot.get("workspace_id", "repo-main")
-
-
-async def _audit_log(
-    run_id: str, agent_role: str, action: str, target: str,
-    status: str, reason: str | None = None,
-) -> None:
-    """Persist an audit log entry (fire-and-forget)."""
-    try:
-        async with async_session() as session:
-            entry = AuditLogModel(
-                run_id=run_id, agent_role=agent_role, action=action,
-                target=target, status=status, reason=reason,
-            )
-            session.add(entry)
-            await session.commit()
-    except Exception:
-        logger.exception("Failed to write audit log for run %s", run_id)
-
-
-# ─── Endpoints ────────────────────────────────────────────────────────────────
-
-
-@router.post("/read_file", response_model=MCPReadFileResponse)
-async def mcp_read_file(
-    body: MCPReadFileRequest,
-    run_id: str = Depends(require_mcp_auth),
-    manager: RunManager = Depends(get_run_manager),
-    client: OpenHandsClient = Depends(get_openhands_client),
-) -> MCPReadFileResponse:
-    """Read a file from the run's workspace."""
-    workspace_id = _resolve_workspace_id(run_id, manager)
-    content = await client.read_file(workspace_id, body.path)
-
-    await _audit_log(run_id, "unknown", "read_file", body.path, "allowed")
-
-    return MCPReadFileResponse(
-        path=body.path,
-        content=content,
-        workspaceId=workspace_id,
-    )
-
-
-@router.post("/write_file", response_model=MCPWriteFileResponse)
-async def mcp_write_file(
-    body: MCPWriteFileRequest,
-    run_id: str = Depends(require_mcp_auth),
-    manager: RunManager = Depends(get_run_manager),
-    client: OpenHandsClient = Depends(get_openhands_client),
-) -> MCPWriteFileResponse:
-    """Write a file to the run's workspace."""
-    workspace_id = _resolve_workspace_id(run_id, manager)
-    success = await client.write_file(workspace_id, body.path, body.content)
-
-    await _audit_log(run_id, "unknown", "write_file", body.path, "allowed")
-
-    return MCPWriteFileResponse(
-        path=body.path,
-        success=success,
-        workspaceId=workspace_id,
-    )
-
-
-@router.post("/exec", response_model=MCPExecResponse)
-async def mcp_exec(
-    body: MCPExecRequest,
-    run_id: str = Depends(require_mcp_auth),
-    manager: RunManager = Depends(get_run_manager),
-    client: OpenHandsClient = Depends(get_openhands_client),
-) -> MCPExecResponse:
-    """Execute a command in the run's workspace with safety enforcement."""
-
-    # ── Command Policy Check ─────────────────────────────────
-    policy_result = CommandPolicy.check(body.command, body.agent_role)
-
-    if not policy_result.allowed:
-        logger.warning(
-            "BLOCKED command for run=%s role=%s: %s (reason: %s)",
-            run_id, body.agent_role, body.command, policy_result.reason,
-        )
-        await _audit_log(
-            run_id, body.agent_role, "exec", body.command,
-            "blocked", policy_result.reason,
-        )
-
-        # Return structured error matching tool format (Rule 3)
-        error = policy_result.to_exec_error()
-        return MCPExecResponse(
-            exitCode=error["exitCode"],
-            stdout=error["stdout"],
-            stderr=error["stderr"],
-            durationMs=error["durationMs"],
-        )
-
-    # ── Execute ──────────────────────────────────────────────
-    workspace_id = _resolve_workspace_id(run_id, manager)
-    result = await client.execute_command(workspace_id, body.command, body.cwd)
-
-    await _audit_log(run_id, body.agent_role, "exec", body.command, "allowed")
-
-    return MCPExecResponse(
-        exitCode=result["exit_code"],
-        stdout=result["stdout"],
-        stderr=result["stderr"],
-        durationMs=result["duration_ms"],
-    )
+logger.info(
+    "MCP Facade mounted (JWT-protected): /internal/mcp/{dev,qa,tech-lead}/sse "
+    "(workspace: %s)", _workspace_root,
+)

@@ -34,6 +34,7 @@ import type {
 } from '../types/runEvents';
 
 const DEFAULT_API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || '';
+const MAX_RECONNECT_ATTEMPTS = 10;
 const TERMINAL_EVENT_TYPES = new Set(['run:complete', 'run:error']);
 const SERVER_EVENT_TYPES = new Set<RunSocketServerEvent['type']>([
   'connection:ready',
@@ -158,6 +159,17 @@ export function useRunConnection(): UseRunConnectionReturn {
   const shouldReconnectRef = useRef(false);
   const lastWsUrlRef = useRef<string | null>(null);
 
+  // AUDIT FIX: Hydration gate — queues WS messages while snapshot fetch
+  // is in-flight, then flushes them after snapshot applies. This prevents
+  // stale REST data from overwriting newer real-time WS events.
+  const isHydratingRef = useRef(false);
+  const pendingEventsRef = useRef<RunSocketServerEvent[]>([]);
+
+  // AUDIT FIX: Mutable refs for reconnection state. The socket.onopen
+  // closure traps stale React state — these refs are always current.
+  const reconnectAttemptRef = useRef(0);
+  const runIdRef = useRef<string | null>(null);
+
   const [state, setState] = useState<RunConnectionState>({
     runId: null,
     runStatus: null,
@@ -203,6 +215,11 @@ export function useRunConnection(): UseRunConnectionReturn {
   };
 
   const dispatchServerEvent = (event: RunSocketServerEvent) => {
+    // AUDIT FIX: Keep the mutable ref in sync for reconnect hydration.
+    if (event.runId) {
+      runIdRef.current = event.runId;
+    }
+
     setState((current) => ({
       ...current,
       runId: event.runId ?? current.runId,
@@ -348,7 +365,7 @@ export function useRunConnection(): UseRunConnectionReturn {
       }
 
       case 'qa:report': {
-        // QA defect report — update retry state for UI indicators
+        // QA defect report — update retry state with dimensional scores
         setQaRetryState({
           taskId: event.data.taskId,
           attempt: event.data.attempt,
@@ -356,6 +373,8 @@ export function useRunConnection(): UseRunConnectionReturn {
           status: event.data.retryable ? 'retrying' : 'failed',
           failingCommand: event.data.failingCommand,
           defectSummary: event.data.summary,
+          scores: event.data.scores ?? null,
+          failingDimensions: event.data.failingDimensions ?? [],
         });
 
         addMessageFromServer({
@@ -373,8 +392,23 @@ export function useRunConnection(): UseRunConnectionReturn {
       }
 
       case 'qa:passed': {
-        // QA passed — clear retry state
-        clearQaRetryState();
+        // QA passed — show passing scores briefly, then auto-clear
+        if (event.data.scores && Object.keys(event.data.scores).length > 0) {
+          setQaRetryState({
+            taskId: event.data.taskId,
+            attempt: event.data.attempt,
+            maxAttempts: 3,
+            status: 'passed',
+            failingCommand: null,
+            defectSummary: event.data.summary,
+            scores: event.data.scores,
+            failingDimensions: [],
+          });
+          // Auto-clear the success banner after 5 seconds
+          setTimeout(() => clearQaRetryState(), 5000);
+        } else {
+          clearQaRetryState();
+        }
 
         addMessageFromServer({
           id: `qa-passed-${event.seq}`,
@@ -389,6 +423,64 @@ export function useRunConnection(): UseRunConnectionReturn {
 
     if (TERMINAL_EVENT_TYPES.has(event.type)) {
       setTerminalStreaming(false);
+    }
+  };
+
+  // ── Reconnect Hydration ───────────────────────────────────────────────
+  // When the WebSocket reconnects after a drop, Redis Pub/Sub events
+  // fired during the gap are lost forever. This function fetches the
+  // latest run snapshot from REST and pushes it into Zustand stores
+  // to recover missed state transitions (tasks, agent updates, etc.).
+
+  const hydrateFromSnapshot = async (runId: string) => {
+    isHydratingRef.current = true;
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/runs/${runId}/snapshot`);
+      if (!res.ok) {
+        console.warn(`[reconnect-hydrate] Snapshot fetch failed: ${res.status}`);
+        return;
+      }
+
+      const snapshot = await res.json();
+
+      // Hydrate tasks
+      if (Array.isArray(snapshot.tasks)) {
+        setTasks(snapshot.tasks);
+      }
+
+      // Hydrate run status + progress
+      if (snapshot.status) {
+        setRunStatus(snapshot.status);
+        setState((current) => ({
+          ...current,
+          runStatus: snapshot.status,
+          runPhase: snapshot.phase ?? current.runPhase,
+          runProgress: snapshot.progress ?? current.runProgress,
+        }));
+      }
+
+      if (typeof snapshot.progress === 'number') {
+        setRunProgress(snapshot.progress);
+      }
+
+      console.info(
+        `[reconnect-hydrate] Recovered state for run ${runId}: ` +
+        `status=${snapshot.status}, tasks=${snapshot.tasks?.length ?? 0}`
+      );
+    } catch (err) {
+      console.error('[reconnect-hydrate] Failed to hydrate from snapshot:', err);
+    } finally {
+      // AUDIT FIX: Release the gate and flush any WS events that arrived
+      // during the snapshot fetch. These are NEWER than the snapshot.
+      isHydratingRef.current = false;
+      const queued = pendingEventsRef.current;
+      pendingEventsRef.current = [];
+      for (const event of queued) {
+        dispatchServerEvent(event);
+      }
+      if (queued.length > 0) {
+        console.info(`[reconnect-hydrate] Flushed ${queued.length} queued WS events`);
+      }
     }
   };
 
@@ -411,6 +503,13 @@ export function useRunConnection(): UseRunConnectionReturn {
 
     socket.onopen = () => {
       setConnectionStatus('connected');
+
+      // AUDIT FIX: Read from mutable refs, not the stale closure `state`.
+      const wasReconnect = reconnectAttemptRef.current > 0;
+      const currentRunId = runIdRef.current;
+
+      reconnectAttemptRef.current = 0;
+
       setState((current) => ({
         ...current,
         isConnected: true,
@@ -418,6 +517,13 @@ export function useRunConnection(): UseRunConnectionReturn {
         reconnectAttempt: 0,
         error: null,
       }));
+
+      // ── Reconnect hydration ────────────────────────────────
+      // When reconnecting after a drop, Redis Pub/Sub events were
+      // lost. Fetch the latest snapshot from REST to recover state.
+      if (wasReconnect && currentRunId) {
+        hydrateFromSnapshot(currentRunId);
+      }
     };
 
     socket.onmessage = (messageEvent) => {
@@ -426,6 +532,14 @@ export function useRunConnection(): UseRunConnectionReturn {
 
         if (!isRunSocketServerEvent(parsed)) {
           throw new Error('Received an unknown websocket message shape.');
+        }
+
+        // AUDIT FIX: If snapshot hydration is in-flight, queue the
+        // event instead of dispatching immediately. The hydration
+        // callback will flush these AFTER applying the snapshot.
+        if (isHydratingRef.current) {
+          pendingEventsRef.current.push(parsed);
+          return;
         }
 
         dispatchServerEvent(parsed);
@@ -463,6 +577,21 @@ export function useRunConnection(): UseRunConnectionReturn {
       setConnectionStatus('reconnecting');
       setState((current) => {
         const reconnectAttempt = current.reconnectAttempt + 1;
+        // AUDIT FIX: Keep the mutable ref in sync so onopen reads fresh data.
+        reconnectAttemptRef.current = reconnectAttempt;
+
+        // ── Cap reconnect attempts to prevent infinite loop ──────
+        if (reconnectAttempt > MAX_RECONNECT_ATTEMPTS) {
+          shouldReconnectRef.current = false;
+          setConnectionStatus('disconnected');
+          return {
+            ...current,
+            reconnectAttempt,
+            isConnecting: false,
+            error: `Cannot connect to server after ${MAX_RECONNECT_ATTEMPTS} attempts. Please check your network and refresh the page.`,
+          };
+        }
+
         const reconnectDelay = Math.min(1000 * 2 ** (reconnectAttempt - 1), 10_000);
 
         reconnectTimerRef.current = window.setTimeout(() => {
@@ -498,6 +627,8 @@ export function useRunConnection(): UseRunConnectionReturn {
       runStatus: run.status,
       runPhase: 'connecting',
     }));
+    // AUDIT FIX: Keep the mutable ref in sync for reconnect hydration.
+    runIdRef.current = run.runId;
 
     connect(absoluteWsUrl);
     return { runId: run.runId, wsUrl: absoluteWsUrl };

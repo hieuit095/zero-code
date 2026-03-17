@@ -135,7 +135,7 @@ React UI
 
 ## Sequential Phases
 
-## Phase 0: Stabilize the Prototype
+## Phase 0: Stabilize the Prototype — ✅ DELIVERED
 
 ### Objective
 
@@ -169,7 +169,7 @@ Clean the current codebase enough that it can safely become the shell of a real 
 
 You do not want to introduce OpenHands, MCP, workers, and WebSockets while the shell itself is still drifting.
 
-## Phase 1: Deploy the OpenHands Runtime Layer
+## Phase 1: Deploy the OpenHands Runtime Layer — ✅ DELIVERED
 
 ### Objective
 
@@ -210,7 +210,7 @@ Deploy a real isolated workspace backend before building the agent loop.
 - The SDK install path includes `openhands-sdk`, `openhands-tools`, `openhands-workspace`, and `openhands-agent-server`.
 - OpenHands remote agent servers are explicitly designed for isolated production deployments and support REST + WebSocket streaming.
 
-## Phase 2: Deploy the Sandbox MCP Facade
+## Phase 2: Deploy the Sandbox MCP Facade — ✅ DELIVERED
 
 ### Objective
 
@@ -292,7 +292,7 @@ Configure Nanobot agents with a run-scoped MCP config:
 
 This is the phase that converts the system from "AI with custom wrappers" into "AI with a native programming environment."
 
-## Phase 3: Deploy the FastAPI Orchestrator
+## Phase 3: Deploy the FastAPI Orchestrator — ✅ DELIVERED
 
 ### Objective
 
@@ -333,7 +333,7 @@ Deploy the backend that owns runs, sessions, sockets, and state transitions.
 - Use Redis for event fan-out and cancellation signals.
 - Keep all websocket events append-only with sequence numbers.
 
-## Phase 4: Cut the Frontend Over to Live Data
+## Phase 4: Cut the Frontend Over to Live Data — ✅ DELIVERED
 
 ### Objective
 
@@ -366,7 +366,7 @@ Deploy the current React UI against the real backend without redesigning it.
 - Browser refresh can recover a live run snapshot.
 - The editor, task list, chatter feed, and terminal all move from backend events.
 
-## Phase 5: Deploy the First Vertical Slice
+## Phase 5: Deploy the First Vertical Slice — ✅ DELIVERED
 
 ### Objective
 
@@ -407,7 +407,12 @@ It proves the two hardest product assumptions:
 - Nanobot can operate correctly through the MCP facade.
 - OpenHands can support the file and command loop reliably enough for automation.
 
-## Phase 6: Deploy the Full Leader / Dev / QA Loop
+## Phase 6: Deploy the Full Leader / Dev / QA Loop — ✅ DELIVERED
+
+> **Post-Delivery Enhancement:** The Mentorship Escalation Loop is now active.
+> Dev gets 2 standard attempts, then 1 mentored attempt with Leader guidance
+> (`leader_guidance.md`) before escalating to full Leader re-planning.
+> LLM Economic Routing is live — agents use specialized models by cost/capability tier.
 
 ### Objective
 
@@ -461,7 +466,7 @@ OpenHands documents position Task Tool Set as best for expert delegation and mul
   - Dev retry
   - QA success
 
-## Phase 7: Persistence, Context, and Long-Run Reliability
+## Phase 7: Persistence, Context, and Long-Run Reliability — ✅ DELIVERED
 
 ### Objective
 
@@ -496,7 +501,7 @@ Make long sessions resumable, affordable, and reliable.
 - A long session can be resumed from persisted state.
 - Per-run and per-agent cost reports are visible in admin views or logs.
 
-## Phase 8: Security Hardening and Safe Operations
+## Phase 8: Security Hardening and Safe Operations — ✅ DELIVERED
 
 ### Objective
 
@@ -544,7 +549,7 @@ Lock down the system before any external beta.
 - Dangerous commands are blocked or require explicit policy approval.
 - Audit logs are complete enough for incident review.
 
-## Phase 9: Staging Rollout
+## Phase 9: Staging Rollout — 🟡 IN PROGRESS (Dogfooding)
 
 ### Objective
 

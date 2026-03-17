@@ -60,6 +60,7 @@ async def run_websocket(websocket: WebSocket, run_id: str) -> None:
                 try:
                     await websocket.send_json(event)
                 except Exception:
+                    logger.warning("Failed to send WS event for run %s, closing forward loop", run_id, exc_info=True)
                     break
 
                 # Auto-close after terminal events
@@ -81,14 +82,42 @@ async def run_websocket(websocket: WebSocket, run_id: str) -> None:
                             from ..orchestrator.run_manager import get_run_manager
                             manager = get_run_manager()
                             reason = msg.get("data", {}).get("reason", "user_cancelled")
-                            manager.cancel_run(run_id, reason)
+                            await manager.cancel_run(run_id, reason)
+
+                        elif msg_type == "run:start":
+                            from ..orchestrator.run_manager import get_run_manager
+                            from ..services.event_broker import get_event_broker as _get_broker
+                            manager = get_run_manager()
+                            data = msg.get("data", {})
+                            goal = data.get("goal", "")
+                            workspace_id = data.get("workspaceId", "repo-main")
+                            agent_config = data.get("agentConfig")
+
+                            if goal:
+                                run = await manager.create_run(
+                                    goal=goal,
+                                    workspace_id=workspace_id,
+                                    agent_config=agent_config,
+                                )
+                                # Enqueue to Redis for the background worker
+                                evt_broker = _get_broker()
+                                await evt_broker.enqueue_run(run["run_id"])
+
+                                # Send run:created back over WS
+                                created_event = broker.build_event(
+                                    run["run_id"], "run:created", {
+                                        "status": run["status"],
+                                        "workspaceId": run["workspace_id"],
+                                    }
+                                )
+                                await websocket.send_json(created_event)
 
                     except json.JSONDecodeError:
                         logger.warning("Invalid JSON from WS client: %s", raw[:100])
             except WebSocketDisconnect:
-                pass
+                logger.debug("WS client disconnected for run %s (listen_client)", run_id)
             except Exception:
-                pass
+                logger.exception("Unhandled error in listen_client for run %s", run_id)
 
         # Run both tasks concurrently
         forward_task = asyncio.create_task(forward_events())
@@ -104,7 +133,7 @@ async def run_websocket(websocket: WebSocket, run_id: str) -> None:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                pass
+                logger.debug("Cancelled pending WS task for run %s", run_id)
 
     except WebSocketDisconnect:
         logger.info("WS disconnected for run %s", run_id)
@@ -118,4 +147,4 @@ async def run_websocket(websocket: WebSocket, run_id: str) -> None:
         try:
             await websocket.close()
         except Exception:
-            pass
+            logger.warning("Error closing WebSocket for run %s", run_id, exc_info=True)

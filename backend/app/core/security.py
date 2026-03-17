@@ -10,12 +10,20 @@ Flow:
   RunManager → generates JWT with run_id claim
   Agent → sends JWT as Bearer token to MCP facade
   MCP facade → validates JWT and extracts run_id
+
+SECURITY FIX: JWT secret is loaded from a shared environment variable
+(MCP_JWT_SECRET) via pydantic-settings. Both the API server and the
+background worker share the same secret, eliminating the split-brain
+where each process generated a different random secret.
+
+SECURITY FIX: Run-active validation is done against the DATABASE,
+not an in-memory set. This eliminates the split-brain where the
+worker added runs to its in-memory set but the API process had
+an empty set, rejecting all MCP tool calls with 401.
 """
 
 from __future__ import annotations
 
-import os
-import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -23,15 +31,19 @@ import jwt
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from ..config import get_settings
+from ..db.database import async_session
+from ..db.models import RunModel
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-# Secret key — generated once per process (or set via env var for multi-process)
-_JWT_SECRET = os.environ.get("MCP_JWT_SECRET", secrets.token_urlsafe(32))
 _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRY_MINUTES = 5
 
-# Track active run IDs for extra validation
-_active_runs: set[str] = set()
+
+def _get_jwt_secret() -> str:
+    """Load the JWT secret from shared pydantic-settings config."""
+    return get_settings().mcp_jwt_secret
 
 
 # ─── Token Generation ────────────────────────────────────────────────────────
@@ -47,6 +59,7 @@ def generate_mcp_token(run_id: str, expiry_minutes: int = _JWT_EXPIRY_MINUTES) -
       - iat: issued at
       - exp: expiry time
     """
+    secret = _get_jwt_secret()
     now = datetime.now(UTC)
     payload = {
         "sub": run_id,
@@ -54,13 +67,17 @@ def generate_mcp_token(run_id: str, expiry_minutes: int = _JWT_EXPIRY_MINUTES) -
         "iat": now,
         "exp": now + timedelta(minutes=expiry_minutes),
     }
-    _active_runs.add(run_id)
-    return jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=_JWT_ALGORITHM)
 
 
 def revoke_run_token(run_id: str) -> None:
-    """Mark a run as inactive (tokens for it will be rejected)."""
-    _active_runs.discard(run_id)
+    """
+    No-op placeholder — revocation is now implicit via DB status.
+
+    A run is considered inactive when its status is 'completed', 'failed',
+    or 'cancelled' in the database. No in-memory set needed.
+    """
+    pass
 
 
 # ─── Token Validation ────────────────────────────────────────────────────────
@@ -71,10 +88,11 @@ def validate_mcp_token(token: str) -> dict[str, Any]:
     Validate a JWT and return the decoded claims.
 
     Raises:
-      HTTPException 401 if token is invalid, expired, or for an inactive run.
+      HTTPException 401 if token is invalid, expired, or malformed.
     """
+    secret = _get_jwt_secret()
     try:
-        payload = jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        payload = jwt.decode(token, secret, algorithms=[_JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="MCP token expired")
     except jwt.InvalidTokenError as e:
@@ -84,15 +102,38 @@ def validate_mcp_token(token: str) -> dict[str, Any]:
     if payload.get("purpose") != "mcp_facade":
         raise HTTPException(status_code=401, detail="Token not scoped to MCP facade")
 
-    # Verify run is still active
+    # Verify run_id claim exists
     run_id = payload.get("sub")
     if not run_id:
         raise HTTPException(status_code=401, detail="Token missing run_id claim")
 
-    if run_id not in _active_runs:
-        raise HTTPException(status_code=401, detail=f"Run {run_id} is not active")
-
     return payload
+
+
+# ─── DB-Backed Run Validation ─────────────────────────────────────────────────
+
+_ACTIVE_STATUSES = {"queued", "planning", "delegating", "developing", "verifying", "retrying"}
+
+
+async def _verify_run_is_active(run_id: str) -> None:
+    """
+    Check the DATABASE to verify that the run exists and is in an active state.
+
+    Raises HTTPException 401 if the run is not found or is in a terminal state.
+    This replaces the broken in-memory `_active_runs: set` that caused
+    split-brain failures between the API and worker processes.
+    """
+    async with async_session() as session:
+        run = await session.get(RunModel, run_id)
+
+    if run is None:
+        raise HTTPException(status_code=401, detail=f"Run {run_id} not found in database")
+
+    if run.status not in _ACTIVE_STATUSES:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Run {run_id} is not active (status: {run.status})",
+        )
 
 
 # ─── FastAPI Dependency ───────────────────────────────────────────────────────
@@ -110,6 +151,10 @@ async def require_mcp_auth(
     SECURITY: JWT Bearer token is STRICTLY REQUIRED. The legacy X-Run-Id
     header fallback has been removed to close the authentication bypass.
 
+    SECURITY: Run-active validation is done against the DATABASE,
+    not an in-memory set. Both the API server and background worker
+    share the same DB, making this check consistent across processes.
+
     Returns:
       The validated run_id.
 
@@ -123,4 +168,9 @@ async def require_mcp_auth(
         )
 
     payload = validate_mcp_token(credentials.credentials)
-    return payload["sub"]
+    run_id = payload["sub"]
+
+    # Verify run is active in the DATABASE (not in-memory)
+    await _verify_run_is_active(run_id)
+
+    return run_id

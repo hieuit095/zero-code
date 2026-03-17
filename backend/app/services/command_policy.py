@@ -13,9 +13,13 @@ Policy levels:
 
 from __future__ import annotations
 
+import logging
 import re
+import shlex
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Global Blocklist (always rejected, any role) ─────────────────────────────
@@ -36,9 +40,7 @@ _GLOBAL_BLOCKLIST: list[re.Pattern] = [
 
     # Privilege escalation
     re.compile(r"\bsudo\s+", re.IGNORECASE),
-from typing import Literal
-
-logger = logging.getLogger(__name__)
+]
 
 
 @dataclass
@@ -168,6 +170,66 @@ _DEV_EXTRA_BLOCKED: set[str] = {
 }
 
 
+# ─── Quote-Aware Shell Segment Splitter ──────────────────────────────────────
+# AUDIT FIX: Replaces naive str.split() which broke commands containing
+# |, &&, ||, ; inside quoted strings (e.g., echo "foo && bar").
+
+
+def _split_shell_segments(command: str) -> list[str]:
+    """
+    Split a command string on shell operators (|, &&, ||, ;) while
+    respecting single and double quotes.
+
+    Characters inside matching quotes are never treated as operators.
+    Returns a list of command segments. If no operators are found
+    outside quotes, the entire command is returned as a single segment.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(command)
+
+    while i < n:
+        ch = command[i]
+
+        # ── Track quote state ─────────────────────────────────
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            current.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            current.append(ch)
+            i += 1
+            continue
+
+        # ── Only split on operators when OUTSIDE quotes ───────
+        if not in_single and not in_double:
+            # Check two-char operators first: &&, ||
+            two = command[i: i + 2]
+            if two in ("&&", "||"):
+                segments.append("".join(current))
+                current = []
+                i += 2
+                continue
+            # Single-char operators: |, ;
+            if ch in ("|", ";"):
+                segments.append("".join(current))
+                current = []
+                i += 1
+                continue
+
+        current.append(ch)
+        i += 1
+
+    # Flush remaining
+    segments.append("".join(current))
+    return segments
+
+
 class CommandPolicy:
     """Production-grade command policy using shlex parsing."""
 
@@ -182,28 +244,24 @@ class CommandPolicy:
         Uses shlex.split() for robust tokenization that handles quoting,
         escaping, and multi-word arguments correctly.
         """
+        # ── Step 1: Split on shell operators (|, &&, ||, ;) ────────
+        # AUDIT FIX: Use a quote-aware splitter so operators inside
+        # single or double quotes are treated as literal text, not
+        # as command separators.
+        segments = _split_shell_segments(command)
 
-        # ── Step 1: Handle pipes — check each sub-command ────────
-        if "|" in command:
-            sub_commands = [s.strip() for s in command.split("|")]
-            for sub in sub_commands:
-                result = CommandPolicy.check(sub, role)
+        if len(segments) > 1:
+            for seg in segments:
+                seg = seg.strip()
+                if not seg:
+                    continue
+                result = CommandPolicy.check(seg, role)
                 if not result.allowed:
                     return PolicyResult(
                         allowed=False,
-                        reason=f"Piped command contains blocked sub-command: {result.reason}",
+                        reason=f"Chained/piped command contains blocked segment: {result.reason}",
                         matched_rule=result.matched_rule,
                     )
-
-        # ── Step 2: Handle command chaining (;, &&, ||) ──────────
-        for separator in ["&&", "||", ";"]:
-            if separator in command:
-                sub_commands = [s.strip() for s in command.split(separator)]
-                for sub in sub_commands:
-                    if sub:  # skip empty segments
-                        result = CommandPolicy.check(sub, role)
-                        if not result.allowed:
-                            return result
 
         # ── Step 3: Tokenize with shlex ──────────────────────────
         try:

@@ -14,6 +14,7 @@
 //             a store flag driven by WebSocket 'run:start' / 'run:complete' events (terminalStore.setStreaming).
 //             The agent status derivation below can be removed at that point.
 
+import { useEffect } from 'react';
 import { useTerminalStore } from '../stores/terminalStore';
 import { useAgentStore } from '../stores/agentStore';
 import type { LogLine, LogLineType } from '../types';
@@ -42,6 +43,16 @@ export function useTerminalStream(): TerminalStreamReturn {
   const storeStreaming = useTerminalStore((s) => s.isStreaming);
   const appendLine = useTerminalStore((s) => s.appendLine);
   const clearTerminal = useTerminalStore((s) => s.clearTerminal);
+  const initialize = useTerminalStore((s) => s.initialize);
+  const destroy = useTerminalStore((s) => s.destroy);
+
+  // AUDIT FIX: Ensure the flush timer is alive while a terminal-consuming
+  // component is mounted. On unmount, pause it safely. initialize() is
+  // idempotent — calling it multiple times is harmless.
+  useEffect(() => {
+    initialize();
+    return () => destroy();
+  }, [initialize, destroy]);
 
   // @ai-integration-point: Replace this derived isStreaming with terminalStore.isStreaming alone
   //   once terminalStore.setStreaming is wired to real WebSocket 'run:start' / 'run:complete' events.

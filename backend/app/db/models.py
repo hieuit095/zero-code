@@ -88,3 +88,72 @@ class AuditLogModel(Base):
 
     run: Mapped["RunModel"] = relationship()
 
+
+# ─── Encrypted API Key Vault ──────────────────────────────────────────────────
+
+import os
+from cryptography.fernet import Fernet
+import base64
+import hashlib
+
+# Derive a Fernet key from an env-var secret (or generate per-process)
+_API_KEY_SECRET = os.environ.get("API_KEY_SECRET", "")
+if _API_KEY_SECRET:
+    # Derive a 32-byte key from the secret via SHA-256 → base64
+    _derived = hashlib.sha256(_API_KEY_SECRET.encode()).digest()
+    _FERNET_KEY = base64.urlsafe_b64encode(_derived)
+else:
+    _FERNET_KEY = Fernet.generate_key()
+
+_fernet = Fernet(_FERNET_KEY)
+
+
+def encrypt_key(plaintext: str) -> str:
+    """Encrypt an API key for safe DB storage."""
+    return _fernet.encrypt(plaintext.encode()).decode()
+
+
+def decrypt_key(ciphertext: str) -> str:
+    """Decrypt an API key from DB storage."""
+    return _fernet.decrypt(ciphertext.encode()).decode()
+
+
+class APIKeyModel(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    base_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class LLMRoutingModel(Base):
+    """
+    Singleton table storing which model+provider each agent role uses.
+
+    Only ONE row should exist (id=1). The API upserts this row.
+    """
+    __tablename__ = "llm_routing"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    leader_model: Mapped[str] = mapped_column(String(128), default="gpt-4o")
+    leader_provider: Mapped[str] = mapped_column(String(64), default="openai")
+    dev_model: Mapped[str] = mapped_column(String(128), default="gpt-4o")
+    dev_provider: Mapped[str] = mapped_column(String(64), default="openai")
+    qa_model: Mapped[str] = mapped_column(String(128), default="gpt-4o")
+    qa_provider: Mapped[str] = mapped_column(String(64), default="openai")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+

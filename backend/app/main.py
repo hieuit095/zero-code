@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.admin import router as admin_router
 from .api.mcp import router as mcp_router
 from .api.runs import router as runs_router
+from .api.settings import router as settings_router
 from .api.workspaces import router as workspaces_router
 from .api.ws import router as ws_router
 from .config import get_settings
@@ -69,6 +70,7 @@ app.include_router(workspaces_router)
 app.include_router(ws_router)
 app.include_router(mcp_router)
 app.include_router(admin_router)
+app.include_router(settings_router)
 
 
 # ─── Health ───────────────────────────────────────────────────────────────────

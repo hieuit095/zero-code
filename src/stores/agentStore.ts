@@ -20,6 +20,8 @@ interface QaRetryState {
   status: 'failed' | 'retrying' | 'passed';
   failingCommand: string | null;
   defectSummary: string | null;
+  scores: Record<string, number> | null;
+  failingDimensions: string[];
 }
 
 type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
