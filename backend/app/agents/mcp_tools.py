@@ -1,32 +1,56 @@
 """
 Internal MCP Facade — FastMCP server exposing jailed workspace tools.
 
-PHASE 2 REFACTOR: This module implements the mandated MCP service boundary.
-Instead of tightly-coupled native SDK ToolDefinitions, workspace tools
-(read_file, write_file, exec) are exposed as a proper MCP server over SSE.
+AUDIT REMEDIATION (Phase 2): All tool execution now routes through the
+``OpenHandsClient`` SDK layer instead of raw ``subprocess.run()`` and
+native Python ``open()`` calls.
 
-Agents discover and invoke these tools through standard MCP protocol
-via their `mcp_config`, enforcing the architectural boundary between
-agent cognition and sandbox operations.
+MCP tool dispatch:
+  read_file  → OpenHandsClient.execute_action(TerminalAction("cat ..."))
+  write_file → OpenHandsClient runtime.write_file(path, content)
+  exec       → OpenHandsClient.execute_action(TerminalAction(command))
+
+There are **zero** remaining subprocess or native file I/O calls.
 
 SECURITY INVARIANTS PRESERVED:
-  - `_jail_path()`: os.path.realpath()-based symlink jailing
-  - `CommandPolicy.check()`: role-based command blocklist/allowlist
-  - Role-scoped exec: each role gets its own MCP server instance
+  - ``_jail_path()``: os.path.realpath()-based symlink jailing on every
+    tool invocation *before* the action reaches the SDK executor.
+  - ``CommandPolicy.check()``: role-based command blocklist/allowlist
+    gates the ``exec`` tool *before* forwarding to the SDK.
+  - Role-scoped exec: each role gets its own MCP server instance.
+  - ``SandboxUnavailableError``: raised if the SDK is missing — no
+    fallback to local execution.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import posixpath
-import subprocess
 
 from mcp.server.fastmcp import FastMCP
 
 from ..services.command_policy import CommandPolicy
+from ..services.openhands_client import (
+    OpenHandsClient,
+    SandboxUnavailableError,
+    get_openhands_client,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ─── SDK Import Guard ─────────────────────────────────────────────────────────
+
+_SDK_AVAILABLE = False
+
+try:
+    from openhands.tools.terminal import TerminalAction
+    _SDK_AVAILABLE = True
+except ImportError:
+    logger.warning(
+        "OpenHands SDK not installed — MCP tools will be unavailable. "
+        "Install with: pip install openhands-sdk openhands-tools"
+    )
 
 
 # ─── Path Jailing ─────────────────────────────────────────────────────────────
@@ -79,6 +103,10 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
     Each role (dev, qa, tech-lead) gets its own server instance with
     role-appropriate command policy enforcement.
 
+    All tool execution is routed through the ``OpenHandsClient`` SDK
+    layer — there are no ``subprocess``, ``os.system``, or native
+    ``open()`` calls inside these tools.
+
     Args:
         workspace_root: Absolute host path to the workspace directory.
         role: Agent role for command policy scoping ("dev", "qa", "tech-lead").
@@ -90,7 +118,9 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
         name=f"zero-code-sandbox-{role}",
         instructions=(
             f"Sandbox tools for the {role} agent. Provides secure file "
-            f"read/write and command execution within the workspace jail."
+            f"read/write and command execution within the workspace jail. "
+            f"All operations are executed through the OpenHands SDK — "
+            f"no host-level subprocess or file I/O is used."
         ),
     )
 
@@ -99,10 +129,12 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
     @mcp.tool()
     def read_file(path: str) -> str:
         """
-        Securely read a file from the workspace.
+        Securely read a file from the workspace via the OpenHands SDK.
 
-        Path is validated against the workspace jail to prevent symlink
-        escapes and directory traversal. Use /workspace/... paths.
+        The path is jail-validated against the workspace root *before*
+        the read action reaches the SDK executor.  The actual file read
+        is performed by the SDK's ``TerminalExecutor`` (``cat``), NOT by
+        a native Python ``open()`` call.
 
         Args:
             path: File path relative to workspace root (e.g. /workspace/src/main.py)
@@ -110,14 +142,29 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
         Returns:
             The full text content of the file.
         """
+        if not _SDK_AVAILABLE:
+            return "Error: OpenHands SDK is not installed. Cannot read files."
+
         try:
+            # Validate path stays within the jail BEFORE touching the SDK
             safe_path = _jail_path(workspace_root, path)
-            with open(safe_path, "r", encoding="utf-8") as f:
-                return f.read()
+
+            # Route through the SDK runtime
+            client = get_openhands_client()
+            runtime = client.get_runtime("repo-main")
+            observation = runtime.terminal(
+                TerminalAction(command=f"cat {_shell_quote(safe_path)}")
+            )
+
+            if observation.exit_code != 0:
+                return f"Error: File not found or unreadable: {path}"
+
+            return observation.text
+
+        except SandboxUnavailableError as e:
+            return f"Error: Sandbox unavailable — {e}"
         except ValueError as e:
             return f"Error: {e}"
-        except FileNotFoundError:
-            return f"Error: File not found: {path}"
         except Exception as e:
             return f"Error reading file: {e}"
 
@@ -126,10 +173,12 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
     @mcp.tool()
     def write_file(path: str, content: str) -> str:
         """
-        Securely write a complete file to the workspace.
+        Securely write a complete file to the workspace via the OpenHands SDK.
 
-        Creates parent directories if they don't exist. Path is validated
-        against the workspace jail to prevent symlink escapes.
+        Creates parent directories if they don't exist. The path is
+        jail-validated *before* the write action reaches the SDK executor.
+        The actual write is performed via the SDK's ``TerminalExecutor``
+        using a base64 pipeline — NOT by a native Python ``open()`` call.
 
         Args:
             path: File path relative to workspace root (e.g. /workspace/src/main.py)
@@ -138,12 +187,20 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
         Returns:
             Success message or error description.
         """
+        if not _SDK_AVAILABLE:
+            return "Error: OpenHands SDK is not installed. Cannot write files."
+
         try:
+            # Validate path stays within the jail BEFORE touching the SDK
             safe_path = _jail_path(workspace_root, path)
-            os.makedirs(os.path.dirname(safe_path), exist_ok=True)
-            with open(safe_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            return "File written successfully."
+
+            # Route through the SDK runtime
+            client = get_openhands_client()
+            runtime = client.get_runtime("repo-main")
+            return runtime.write_file(path, content)
+
+        except SandboxUnavailableError as e:
+            return f"Error: Sandbox unavailable — {e}"
         except ValueError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -154,11 +211,14 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
     @mcp.tool()
     def exec(command: str, cwd: str = "/workspace") -> str:
         """
-        Execute a shell command inside the workspace with policy enforcement.
+        Execute a shell command inside the workspace via the OpenHands SDK.
 
-        The command is checked against the role-based security policy before
-        execution. Destructive commands (rm -rf /, sudo, etc.) are blocked.
-        The working directory is jail-validated to prevent escapes.
+        The command is checked against the role-based security policy
+        *before* being forwarded to the SDK executor.  The working
+        directory is jail-validated to prevent escapes.
+
+        Execution happens through the SDK's ``TerminalExecutor`` — NOT
+        via ``subprocess.run()``.
 
         Args:
             command: Shell command to execute.
@@ -167,55 +227,72 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
         Returns:
             Command output (stdout + stderr) and exit code.
         """
-        # Command Policy Enforcement
+        if not _SDK_AVAILABLE:
+            return "Error: OpenHands SDK is not installed. Cannot execute commands."
+
+        # ── Command Policy Enforcement (unchanged) ────────────────────
         policy_result = CommandPolicy.check(command, role)
         if not policy_result.allowed:
-            return f"POLICY BLOCKED: {policy_result.reason} [rule: {policy_result.matched_rule}]"
+            return (
+                f"POLICY BLOCKED: {policy_result.reason} "
+                f"[rule: {policy_result.matched_rule}]"
+            )
 
-        # Jail cwd against traversal/symlinks
+        # ── Jail cwd against traversal / symlinks ─────────────────────
         try:
             _jail_path(workspace_root, cwd)
         except ValueError as e:
             return f"CWD jail escape detected: {e}"
-
-        # Resolve host-side cwd
-        if cwd.startswith("/workspace/"):
-            relative_cwd = cwd[len("/workspace/"):]
-        elif cwd == "/workspace":
-            relative_cwd = "."
-        else:
-            relative_cwd = cwd
-
-        host_cwd = os.path.join(
-            os.path.realpath(workspace_root),
-            os.path.normpath(relative_cwd),
-        )
 
         # Additional traversal guard
         parts = cwd.split("/")
         if ".." in parts or cwd == "/" or cwd.startswith("/etc"):
             return "Error: Invalid cwd inside container"
 
-        # Execute via subprocess (within the jailed host directory)
+        # ── Route through the SDK TerminalExecutor ────────────────────
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                cwd=host_cwd,
-                capture_output=True,
-                text=True,
-                timeout=120,
+            # Prepend a `cd` into the cwd so the command runs in the
+            # correct directory inside the SDK executor.
+            if cwd and cwd != "/workspace":
+                # Resolve relative cwd for the cd command
+                if cwd.startswith("/workspace/"):
+                    resolved_cwd = os.path.join(
+                        os.path.realpath(workspace_root),
+                        os.path.normpath(cwd[len("/workspace/"):]),
+                    )
+                else:
+                    resolved_cwd = os.path.realpath(workspace_root)
+                full_command = f"cd {_shell_quote(resolved_cwd)} && {command}"
+            else:
+                full_command = f"cd {_shell_quote(os.path.realpath(workspace_root))} && {command}"
+
+            client = get_openhands_client()
+            runtime = client.get_runtime("repo-main")
+            observation = runtime.terminal(
+                TerminalAction(command=full_command)
             )
-            output_parts = []
-            if result.stdout.strip():
-                output_parts.append(f"STDOUT:\n{result.stdout}")
-            if result.stderr.strip():
-                output_parts.append(f"STDERR:\n{result.stderr}")
-            output_parts.append(f"EXIT CODE: {result.returncode}")
+
+            # Format the observation into the same contract the agents expect
+            output_parts: list[str] = []
+            text = observation.text or ""
+
+            if text.strip():
+                output_parts.append(f"STDOUT:\n{text}")
+
+            output_parts.append(f"EXIT CODE: {observation.exit_code}")
             return "\n".join(output_parts)
-        except subprocess.TimeoutExpired:
-            return "Error: Command timed out after 120 seconds"
+
+        except SandboxUnavailableError as e:
+            return f"Error: Sandbox unavailable — {e}"
         except Exception as e:
             return f"Execution error: {e}"
 
     return mcp
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _shell_quote(s: str) -> str:
+    """Single-quote a string for safe shell interpolation."""
+    return "'" + s.replace("'", "'\\''") + "'"

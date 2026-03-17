@@ -359,30 +359,33 @@ class TaskDelegator:
 
     async def _emit_critique_artifact(self) -> None:
         """
-        Read critique_report.md from the workspace and emit fs:update
-        so it instantly appears in the frontend FileExplorer.
+        Read critique_report.md from the workspace via the OpenHands SDK
+        and emit fs:update so it instantly appears in the frontend
+        FileExplorer.
+
+        AUDIT REMEDIATION: Uses OpenHandsClient.get_runtime().read_file()
+        instead of host-side Path.exists() / Path.read_text().
         """
         try:
-            from ..config import get_settings
-            settings = get_settings()
-            critique_path = settings.workspace_path / "repo-main" / "critique_report.md"
-            if critique_path.exists():
-                content = critique_path.read_text(encoding="utf-8", errors="replace")
-                await self._mgr._emit_fs_update(
-                    self._run_id,
-                    "critique_report.md",
-                    content,
-                    source_agent="qa",
-                )
-                logger.info(
-                    "Emitted fs:update for critique_report.md (%d bytes) on run %s",
-                    len(content), self._run_id,
-                )
-            else:
-                logger.debug(
-                    "critique_report.md not found at %s — skipping fs:update",
-                    critique_path,
-                )
+            from ..services.openhands_client import get_openhands_client
+            client = get_openhands_client()
+            runtime = client.get_runtime("repo-main")
+            content = runtime.read_file("/workspace/critique_report.md")
+
+            await self._mgr._emit_fs_update(
+                self._run_id,
+                "critique_report.md",
+                content,
+                source_agent="qa",
+            )
+            logger.info(
+                "Emitted fs:update for critique_report.md (%d bytes) on run %s",
+                len(content), self._run_id,
+            )
+        except FileNotFoundError:
+            logger.debug(
+                "critique_report.md not found in sandbox — skipping fs:update",
+            )
         except Exception:
             logger.warning(
                 "Failed to emit critique artifact for run %s", self._run_id,
@@ -443,14 +446,16 @@ class TaskDelegator:
 
         guidance = mentor_result.raw_output or mentor_result.summary or ""
 
-        # ── Persist guidance to workspace ────────────────────────────
+        # ── Persist guidance to workspace via OpenHands SDK ─────────
+        # AUDIT REMEDIATION: Uses OpenHandsClient.get_runtime().write_file()
+        # instead of host-side Path.write_text().
         try:
-            from ..config import get_settings
-            settings = get_settings()
-            guidance_path = settings.workspace_path / "repo-main" / "leader_guidance.md"
-            guidance_path.write_text(guidance, encoding="utf-8")
+            from ..services.openhands_client import get_openhands_client
+            client = get_openhands_client()
+            runtime = client.get_runtime("repo-main")
+            runtime.write_file("/workspace/leader_guidance.md", guidance)
             logger.info(
-                "Wrote leader_guidance.md (%d bytes) for run %s",
+                "Wrote leader_guidance.md (%d bytes) via SDK for run %s",
                 len(guidance), self._run_id,
             )
         except Exception:
