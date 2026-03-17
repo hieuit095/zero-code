@@ -10,13 +10,25 @@
 
 ---
 
-## 🚀 Vision & Objectives
+## 📖 The Origin Story (The Pain Point)
 
-LLMs are incredible at writing code, but human developers now suffer from **"verification fatigue"**—spending more time testing, reading logs, and reprompting than actually building.
+Modern AI coding tools are mostly glorified single-shot generators or advanced autocomplete. When building complex applications, the AI writes the code, but the human developer is forced to become the AI's debugger. The human has to run the code, find the terminal errors, copy-paste the logs back to the LLM, and pray it fixes them without breaking something else. This creates immense **"Verification Fatigue"**.
 
-ZeroCode solves this by introducing a completely autonomous, self-correcting development loop. Instead of functioning as a one-shot code generator, ZeroCode is a non-linear execution environment where AI writes the code, an independent AI tests it inside a secure sandbox, and the system intelligently fixes its own bugs before ever returning control to the user.
+The vision for ZeroCode was born from this frustration: *What if the AI didn't just write the code, but actually compiled, tested, and fixed its own bugs inside a secure sandbox before ever presenting it to the human?*
 
 > **Architectural Invariant:** The system must verify its own work inside a sandbox and fix itself when verification fails. The user receives a completed, passing result, not a raw terminal output of failures.
+
+---
+
+## 🔄 The Non-Linear Auto-Healing Loop (The Deep Dive)
+
+ZeroCode is not a simple chain, but a self-correcting loop. Here is the flow of our State Machine:
+
+1. **Planning:** The Leader (High-Reasoning LLM) decomposes the human's goal into atomic tasks.
+2. **Execution:** The Dev (High-Coding LLM) writes the code using Sandbox MCP tools.
+3. **4-Dimensional Verification:** The QA Agent runs linters/tests in the same sandbox and scores the code on Quality, Requirements, Robustness, and Security (0-100).
+4. **The Iterative Loop:** If QA fails (e.g., Security < 90), it outputs a `critique_report.md`. The Dev agent reads this and retries.
+5. **The Mentorship Escalation:** If the Dev agent fails 2 times, the loop pauses. The Leader steps in, analyzes the broken code, and outputs a high-level `leader_guidance.md` architectural fix. The Dev gets a final attempt armed with this guidance.
 
 ---
 
