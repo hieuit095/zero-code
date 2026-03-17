@@ -91,7 +91,7 @@ To get ZeroCode running locally, follow these steps to initialize the database, 
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-org/zerocode.git
+git clone https://github.com/hieuit095/zero-code.git
 cd zerocode
 ```
 
