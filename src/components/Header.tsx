@@ -17,9 +17,7 @@
 //     sendMessage({ type: "run:start", goal });
 //   };
 //   This requires threading sendMessage from useAgentConnection through to Header.
-
-
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Bot, Sparkles, Settings, ChevronDown, Zap, RotateCcw, AlertTriangle, X } from 'lucide-react';
 import { useRunConnection } from '../hooks/useRunConnection';
 import { useAgentStore } from '../stores/agentStore';
@@ -27,11 +25,19 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { SettingsModal } from './settings/SettingsModal';
 import type { SettingsTab } from './settings/SettingsModal';
 
+const HEALTH_POLL_INTERVAL = 10_000;
+const DEFAULT_API_BASE_URL = 'http://localhost:8000';
+
+function getApiBaseUrl() {
+  return (import.meta.env.VITE_API_BASE_URL as string)?.trim() || DEFAULT_API_BASE_URL;
+}
+
 export function Header() {
   const [goal, setGoal] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('agent-setup');
   const [errorDismissed, setErrorDismissed] = useState(false);
+  const [serverReachable, setServerReachable] = useState(true);
   const { startRun, disconnect, sendMessage, isConnected, error: runError } = useRunConnection();
   const runStatus = useAgentStore((s) => s.runStatus);
   const progress = useAgentStore((s) => s.runProgress);
@@ -42,6 +48,31 @@ export function Header() {
   const workspaceId = useSettingsStore((s) => s.workspaceId);
 
   const isRunning = runStatus !== null && runStatus !== 'completed' && runStatus !== 'failed';
+  const healthTimerRef = useRef<number | null>(null);
+
+  // ── Server health check polling ──────────────────────────────────────
+  // Polls /health every 10s to distinguish "server is down" from
+  // "no active run" (which is normal pre-run).
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/health`, { signal: AbortSignal.timeout(3000) });
+        setServerReachable(res.ok);
+      } catch {
+        setServerReachable(false);
+      }
+    };
+
+    // Check immediately on mount
+    checkHealth();
+
+    healthTimerRef.current = window.setInterval(checkHealth, HEALTH_POLL_INTERVAL);
+    return () => {
+      if (healthTimerRef.current !== null) {
+        window.clearInterval(healthTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleGenerate = async () => {
     if (!goal.trim() || isRunning) return;
@@ -55,7 +86,7 @@ export function Header() {
           data: { goal: goal.trim(), workspaceId, agentConfig },
         });
       } else {
-        // Fallback: REST → WS handshake for cold start
+        // Fallback: REST -> WS handshake for cold start
         await startRun({ goal: goal.trim(), workspaceId, agentConfig });
       }
     } catch {
@@ -72,7 +103,12 @@ export function Header() {
   // PHASE 3 FIX: Surface fatal run:error messages visibly.
   const showErrorBanner = !!runError && !errorDismissed;
 
-  const showDisconnectBanner = connectionStatus === 'disconnected' || connectionStatus === 'reconnecting';
+  // Only show disconnect banner when:
+  // 1. Server is actually unreachable (health check failed), OR
+  // 2. We have an active run but the WS dropped (reconnecting state)
+  const showDisconnectBanner =
+    !serverReachable ||
+    (isRunning && (connectionStatus === 'disconnected' || connectionStatus === 'reconnecting'));
 
   return (
     <>
