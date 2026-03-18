@@ -82,42 +82,72 @@ flowchart LR
 
 ## 🚀 Getting Started
 
-To get ZeroCode running locally:
+### Prerequisites
 
-### 1. Clone the Repository
+| Tool | Min Version | Download |
+|------|-------------|----------|
+| Python | 3.11+ | [python.org](https://www.python.org/downloads/) |
+| Node.js | 18+ | [nodejs.org](https://nodejs.org/) |
+| Docker & Compose | latest | [docker.com](https://docs.docker.com/get-docker/) |
+
+### One-Click Setup
+
+Clone the repository and run the setup script — it verifies dependencies, creates `.env` files, installs all packages, and boots Redis.
+
 ```bash
 git clone https://github.com/hieuit095/zero-code.git
-cd zerocode
+cd zero-code
+
+# macOS / Linux
+chmod +x setup.sh
+./setup.sh
+
+# Windows
+setup.bat
 ```
 
-### 2. Configure Environment Variables
-Copy the example environment file and set up your multi-provider LLM keys for Economic Routing.
+The script will print exact next-steps when finished. In short:
+
+```bash
+# 1. Edit .env with your LLM API keys
+# 2. Terminal 1 — Backend:   source backend/venv/bin/activate && cd backend && python -m uvicorn app.main:app --reload --port 8000
+# 3. Terminal 2 — Worker:    source backend/venv/bin/activate && cd backend && python -m worker
+# 4. Terminal 3 — Frontend:  npm run dev
+# 5. Open http://localhost:5173
+```
+
+<details>
+<summary><strong>Manual Setup (if you prefer not to use the script)</strong></summary>
+
+#### 1. Configure Environment Variables
 ```bash
 cp .env.example .env
-
-# Open .env and ensure the following keys are set:
-# LEADER_LLM_API_KEY=your_gemini_or_openai_key
-# DEV_LLM_API_KEY=your_deepseek_or_minimax_key
-# QA_LLM_API_KEY=your_glm_or_claude_key
-# MCP_JWT_SECRET=generate_a_secure_random_string
+cp backend/.env.example backend/.env
+# Open both .env files and set your LLM API keys and MCP_JWT_SECRET
 ```
 
-### 3. Boot the Backend & Worker
-Start the FastAPI server and the asynchronous worker process. They will communicate via Redis and persist state to PostgreSQL.
+#### 2. Backend
 ```bash
-# Terminal 1: Start the FastAPI API Server
-cd backend
-python -m uvicorn main:app --reload --port 8000
+python3 -m venv backend/venv
+source backend/venv/bin/activate   # Windows: backend\venv\Scripts\activate
+pip install -r backend/requirements.txt
 
-# Terminal 2: Start the Python Async Worker
-cd backend
-python -m worker
+# Terminal 1 — API Server
+cd backend && python -m uvicorn app.main:app --reload --port 8000
+
+# Terminal 2 — Async Worker
+cd backend && python -m worker
 ```
 
-### 4. Boot the Frontend
-Start the React Vite development server to render the UI shell.
+#### 3. Frontend
 ```bash
-# Terminal 3: Start the Vite server
 npm install
 npm run dev
 ```
+
+#### 4. Infrastructure
+```bash
+docker compose -f infra/staging/docker-compose.yml up -d redis
+```
+
+</details>
