@@ -82,6 +82,11 @@ _SANDBOX_NETWORK_ENABLED = os.getenv("OPENSANDBOX_NETWORK_ENABLED", "false").low
 # snapshot rollback instead of incremental patching.
 CATASTROPHIC_SCORE_THRESHOLD = int(os.getenv("OPENSANDBOX_CATASTROPHIC_THRESHOLD", "40"))
 
+# PHASE 1 HARDENING: Reaper interval for background zombie pruning.
+_SANDBOX_REAPER_INTERVAL_SECONDS = int(os.getenv(
+    "OPENSANDBOX_REAPER_INTERVAL_SECONDS", "300",  # 5 minutes
+))
+
 
 # ─── Global Sandbox Registry & Cleanup ────────────────────────────────────────
 # Every provisioned Sandbox instance is tracked here so that we can
@@ -98,6 +103,9 @@ def _cleanup_all_sandboxes() -> None:
     so we try multiple strategies:
       1. Schedule ``sandbox.kill()`` on the running loop.
       2. If no loop is running, spin up a temporary loop to drain kills.
+      3. PHASE 1 HARDENING: Use the Docker SDK directly as a last-resort
+         fallback to kill containers that the async path cannot reach
+         (e.g., after SIGKILL / OOM where the process is force-terminated).
     """
     if not _ACTIVE_SANDBOXES:
         return
@@ -133,6 +141,35 @@ def _cleanup_all_sandboxes() -> None:
     except Exception:
         logger.warning("Fallback cleanup loop failed", exc_info=True)
 
+    # Strategy 3 (PHASE 1 HARDENING): Docker SDK sync fallback.
+    # If atexit fires after a hard crash, try to kill containers
+    # directly via the Docker API.  This catches orphans that the
+    # async SDK path could not reach.
+    try:
+        import docker  # type: ignore[import-untyped]
+        client = docker.from_env()
+        # Kill containers created by the OpenSandbox SDK image.
+        containers = client.containers.list(
+            filters={"ancestor": _DEFAULT_SANDBOX_IMAGE, "status": "running"}
+        )
+        for container in containers:
+            try:
+                container.kill()
+                logger.info(
+                    "Docker SDK killed orphaned container: %s (%s)",
+                    container.short_id, container.name,
+                )
+            except Exception:
+                logger.warning(
+                    "Docker SDK failed to kill container %s",
+                    container.short_id, exc_info=True,
+                )
+    except ImportError:
+        # docker SDK not installed — skip fallback silently.
+        pass
+    except Exception:
+        logger.warning("Docker SDK fallback cleanup failed", exc_info=True)
+
 
 # Register the hook immediately at import time.
 atexit.register(_cleanup_all_sandboxes)
@@ -144,6 +181,69 @@ try:
 except (OSError, ValueError):
     # signal.signal() can fail when called from a non-main thread.
     pass
+
+
+# ─── Background Reaper Task (Phase 1 Hardening) ──────────────────────────────
+
+
+async def start_sandbox_reaper() -> asyncio.Task:
+    """Start a background asyncio task that periodically prunes unhealthy sandboxes.
+
+    PHASE 1 HARDENING: The ``atexit`` handler only fires on normal
+    process exit.  If the worker is SIGKILL'd, OOM-killed, or crashes
+    hard, sandbox containers leak indefinitely.  This reaper runs
+    every ``_SANDBOX_REAPER_INTERVAL_SECONDS`` seconds and:
+      1. Iterates all registered sandboxes.
+      2. Health-checks each with a lightweight ``true`` command.
+      3. Kills and deregisters any sandbox that fails the health check.
+
+    Returns the asyncio.Task so callers can cancel it on shutdown.
+    """
+    async def _reaper_loop() -> None:
+        while True:
+            await asyncio.sleep(_SANDBOX_REAPER_INTERVAL_SECONDS)
+            if not _ACTIVE_SANDBOXES:
+                continue
+
+            stale: list[str] = []
+            for wid, sb in list(_ACTIVE_SANDBOXES.items()):
+                try:
+                    # Lightweight health probe
+                    await asyncio.wait_for(
+                        sb.commands.run("true"),
+                        timeout=10.0,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Reaper: sandbox '%s' is unresponsive — marking for cleanup",
+                        wid,
+                    )
+                    stale.append(wid)
+
+            for wid in stale:
+                sb = _ACTIVE_SANDBOXES.pop(wid, None)
+                if sb is not None:
+                    try:
+                        await sb.kill()
+                        logger.info("Reaper: killed stale sandbox '%s'", wid)
+                    except Exception:
+                        logger.warning(
+                            "Reaper: failed to kill stale sandbox '%s'",
+                            wid, exc_info=True,
+                        )
+
+            if stale:
+                logger.info(
+                    "Reaper cycle complete: pruned %d stale sandbox(es)",
+                    len(stale),
+                )
+
+    task = asyncio.create_task(_reaper_loop(), name="sandbox-reaper")
+    logger.info(
+        "Sandbox reaper started (interval: %ds)",
+        _SANDBOX_REAPER_INTERVAL_SECONDS,
+    )
+    return task
 
 
 # ─── Custom Errors ────────────────────────────────────────────────────────────
@@ -180,6 +280,65 @@ class _WorkspaceRuntime:
             workspace_id,
         )
 
+    # ── In-Container Path Resolution (Phase 1 Symlink Hardening) ───────
+
+    async def _resolve_in_container(self, container_path: str) -> str:
+        """Execute ``realpath`` inside the sandbox to resolve symlinks.
+
+        PHASE 1 HARDENING: Lexical ``posixpath.normpath`` checks cannot
+        detect symlinks created inside the container that point outside
+        ``/workspace``.  This method runs the actual ``realpath`` binary
+        inside the container and verifies the resolved path is still
+        within the ``/workspace`` jail.
+
+        Falls back to the lexical path if the in-container command fails
+        (e.g., container not yet started, binary missing).
+
+        Raises:
+            ValueError: If the resolved path escapes ``/workspace``.
+        """
+        try:
+            execution = await self.sandbox.commands.run(
+                f"realpath -m '{container_path}'"
+            )
+            # Extract stdout from the SDK execution result
+            resolved = ""
+            if execution.logs and execution.logs.stdout:
+                for entry in execution.logs.stdout:
+                    resolved += entry.text
+            resolved = resolved.strip()
+
+            if not resolved:
+                # realpath produced no output — fall back to lexical
+                logger.debug(
+                    "realpath returned empty for '%s' — using lexical path",
+                    container_path,
+                )
+                return container_path
+
+            # Verify the resolved path is still inside the jail
+            if resolved != "/workspace" and not resolved.startswith("/workspace/"):
+                raise ValueError(
+                    f"SYMLINK ESCAPE BLOCKED: '{container_path}' resolved to "
+                    f"'{resolved}' inside the container, which escapes the "
+                    f"/workspace boundary."
+                )
+
+            return resolved
+
+        except ValueError:
+            # Re-raise ValueError (our own security check)
+            raise
+        except Exception:
+            # Container not started, realpath binary missing, etc.
+            # Fall back to the lexical path (already validated by _normalize_path).
+            logger.debug(
+                "In-container realpath failed for '%s' — using lexical path",
+                container_path,
+                exc_info=True,
+            )
+            return container_path
+
     # ── File Operations ───────────────────────────────────────────────
 
     async def read_file(self, path: str) -> str:
@@ -187,8 +346,11 @@ class _WorkspaceRuntime:
         if not self._alive:
             raise SandboxUnavailableError("Workspace runtime has been destroyed")
 
-        # Normalize path to /workspace convention
+        # Pass 1: Lexical normalization (fast, catches obvious traversal)
         container_path = _normalize_path(path)
+
+        # Pass 2: In-container realpath (catches symlink escapes)
+        container_path = await self._resolve_in_container(container_path)
 
         try:
             content = await self.sandbox.files.read_file(container_path)
@@ -201,7 +363,11 @@ class _WorkspaceRuntime:
         if not self._alive:
             raise SandboxUnavailableError("Workspace runtime has been destroyed")
 
+        # Pass 1: Lexical normalization (fast, catches obvious traversal)
         container_path = _normalize_path(path)
+
+        # Pass 2: In-container realpath (catches symlink escapes)
+        container_path = await self._resolve_in_container(container_path)
 
         # Ensure parent directories exist
         parent = os.path.dirname(container_path)

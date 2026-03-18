@@ -23,7 +23,10 @@ SECURITY FIX (ALIGNMENT_AUDIT_REPORT §4):
     2. Validates signature, expiry, and purpose via `validate_mcp_token()`.
     3. Verifies the run is still active in the DATABASE via
        `_verify_run_is_active()`.
-    4. Returns 401 Unauthorized immediately if any check fails.
+    4. PHASE 1 HARDENING: Extracts ``workspace_id`` from the ``wid`` JWT
+       claim and injects it into the ASGI scope ``state`` dict so
+       downstream tool handlers can access it.
+    5. Returns 401 Unauthorized immediately if any check fails.
 
   This closes the critical vulnerability where MCP endpoints were
   completely unauthenticated.
@@ -64,12 +67,19 @@ class JWTAuthMiddleware:
     FastAPI's Depends() system entirely, this middleware is the ONLY
     enforcement point for MCP endpoint authentication.
 
+    PHASE 1 HARDENING: After JWT validation, the ``workspace_id`` is
+    extracted from the ``wid`` claim and injected into the ASGI scope
+    ``state`` dict.  This enables downstream tool handlers to resolve
+    the correct sandbox container without relying on hardcoded values.
+
     Validation chain:
-      1. Extract `Authorization: Bearer <token>` header.
+      1. Extract ``Authorization: Bearer <token>`` header.
       2. Decode and validate JWT (signature, expiry, purpose claim).
       3. Verify the run_id from the token is active in PostgreSQL.
-      4. If any step fails → 401 Unauthorized (JSON body).
-      5. If all pass → forward request to the inner ASGI app.
+      4. Extract ``workspace_id`` from ``wid`` claim.
+      5. If any step fails → 401 Unauthorized (JSON body).
+      6. If all pass → inject ``workspace_id`` into scope state and
+         forward request to the inner ASGI app.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -111,6 +121,13 @@ class JWTAuthMiddleware:
             await self._send_401(send, f"Run validation failed: {detail}")
             return
 
+        # ── PHASE 1 HARDENING: Inject workspace_id into scope state ───
+        workspace_id = payload.get("wid", "repo-main")
+        if "state" not in scope:
+            scope["state"] = {}
+        scope["state"]["workspace_id"] = workspace_id
+        scope["state"]["run_id"] = run_id
+
         # ── All checks passed — forward to inner FastMCP app ─────────
         await self._app(scope, receive, send)
 
@@ -140,10 +157,17 @@ _workspace_root = str(_settings.workspace_path / "repo-main")
 # Each role gets its own FastMCP server with appropriate CommandPolicy scoping.
 # The `.sse_app()` method returns a Starlette ASGI app that handles the
 # MCP SSE transport protocol.
+#
+# PHASE 1 HARDENING NOTE: MCP servers are created at module level with the
+# default workspace_id="repo-main".  The actual workspace_id resolution for
+# runtime agent calls happens inside the tool closures which capture the
+# workspace_id parameter from ``create_mcp_server()``.  When the orchestrator
+# invokes MCP tools directly (e.g., writing leader_guidance.md), it creates
+# a fresh per-call server with the correct workspace_id from the run record.
 
-_dev_mcp = create_mcp_server(_workspace_root, role="dev")
-_qa_mcp = create_mcp_server(_workspace_root, role="qa")
-_lead_mcp = create_mcp_server(_workspace_root, role="tech-lead")
+_dev_mcp = create_mcp_server(_workspace_root, role="dev", workspace_id="repo-main")
+_qa_mcp = create_mcp_server(_workspace_root, role="qa", workspace_id="repo-main")
+_lead_mcp = create_mcp_server(_workspace_root, role="tech-lead", workspace_id="repo-main")
 
 # SECURITY FIX: Wrap each SSE app in JWTAuthMiddleware before mounting.
 # Every request to /internal/mcp/{role}/... must present a valid Bearer
@@ -153,6 +177,7 @@ router.mount("/qa", app=JWTAuthMiddleware(_qa_mcp.sse_app()))
 router.mount("/tech-lead", app=JWTAuthMiddleware(_lead_mcp.sse_app()))
 
 logger.info(
-    "MCP Facade mounted (JWT-protected): /internal/mcp/{dev,qa,tech-lead}/sse "
-    "(workspace: %s)", _workspace_root,
+    "MCP Facade mounted (JWT-protected, workspace_id-aware): "
+    "/internal/mcp/{dev,qa,tech-lead}/sse (default workspace: %s)",
+    _workspace_root,
 )

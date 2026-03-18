@@ -38,6 +38,8 @@ export function Header() {
   const resetAgent = useAgentStore((s) => s.resetToInitial);
   const connectionStatus = useAgentStore((s) => s.connectionStatus);
   const getAgentConfig = useSettingsStore((s) => s.getAgentConfig);
+  // PHASE 3 FIX (Task 3): Dynamic workspace ID from settings store.
+  const workspaceId = useSettingsStore((s) => s.workspaceId);
 
   const isRunning = runStatus !== null && runStatus !== 'completed' && runStatus !== 'failed';
 
@@ -50,11 +52,11 @@ export function Header() {
       if (isConnected) {
         sendMessage({
           type: 'run:start',
-          data: { goal: goal.trim(), workspaceId: 'repo-main', agentConfig },
+          data: { goal: goal.trim(), workspaceId, agentConfig },
         });
       } else {
         // Fallback: REST → WS handshake for cold start
-        await startRun({ goal: goal.trim(), workspaceId: 'repo-main', agentConfig });
+        await startRun({ goal: goal.trim(), workspaceId, agentConfig });
       }
     } catch {
       // Connection error is shown via runConnection state

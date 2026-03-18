@@ -23,10 +23,13 @@ interface SettingsState {
     openaiApiKey: string;
     openrouterApiKey: string;
   };
+  // PHASE 3 FIX (Task 3): Dynamic workspace ID, replaces hardcoded 'repo-main'.
+  workspaceId: string;
 
   setAgentModel: (role: AgentRole, model: string) => void;
   setAgentSystemPrompt: (role: AgentRole, prompt: string | null) => void;
   setApiKey: (provider: keyof SettingsState['apiKeys'], key: string) => void;
+  setWorkspaceId: (id: string) => void;
   getAgentConfig: () => Partial<Record<AgentRole, Record<string, unknown>>>;
   resetSettings: () => void;
 }
@@ -47,6 +50,7 @@ export const useSettingsStore = create<SettingsState>()(
     (set, get) => ({
       agentModels: { ...defaultAgentModels },
       apiKeys: { ...defaultApiKeys },
+      workspaceId: 'repo-main',
 
       setAgentModel: (role, model) => {
         set((state) => ({
@@ -72,6 +76,8 @@ export const useSettingsStore = create<SettingsState>()(
         }));
       },
 
+      setWorkspaceId: (id) => set({ workspaceId: id }),
+
       // @ai-integration-point: Pass this return value as `agentConfig` in RunStartData
       //   when calling startRun({ goal, workspaceId, agentConfig: getAgentConfig() }).
       getAgentConfig: () => {
@@ -93,6 +99,7 @@ export const useSettingsStore = create<SettingsState>()(
         set({
           agentModels: { ...defaultAgentModels },
           apiKeys: { ...defaultApiKeys },
+          workspaceId: 'repo-main',
         }),
     }),
     {

@@ -313,12 +313,26 @@ class QaAgentResult:
     total_tokens: int = 0
 
     def to_report_dict(self) -> dict[str, Any]:
-        """Serialize to the qa:report event data shape (with scores)."""
+        """Serialize to the qa:report event data shape (with scores).
+
+        PHASE 3 FIX (Task 1): Now includes ``failingDimensions`` with
+        dimension NAME keys (e.g. ``"code_quality"``) so the frontend
+        ``TasksPanel.ScoreBar`` can correctly highlight failing bars via
+        ``failingSet.has(dim)``.  Also includes ``failingDimensionDetails``
+        with the full descriptive strings for logging.
+        """
+        failing_full = self.scores.failing_dimensions()
+        # Extract bare dimension names for frontend ScoreBar matching.
+        # Format: "code_quality=25 (min 70)" -> "code_quality"
+        failing_names = [d.split("=")[0] for d in failing_full]
+
         return {
             "taskId": self.task_id,
             "attempt": self.attempt,
             "status": "failed",
             "scores": self.scores.to_dict(),
+            "failingDimensions": failing_names,
+            "failingDimensionDetails": failing_full,
             "failingCommand": self.failing_command,
             "exitCode": self.exit_code,
             "summary": self.summary,

@@ -129,9 +129,14 @@ Brief root cause analysis (2–3 sentences).
 2. Step two…
 3. …
 
+## IMPORTANT: Persist Your Guidance
+After writing your guidance, you MUST save it to `/workspace/leader_guidance.md`
+using the `str_replace_editor` tool (create mode). This ensures the Dev agent
+can reference it during its retry attempt.
+
 ## Rules
-- You MUST NOT write code or modify any files.
-- You MUST NOT output JSON task arrays.
+- You MUST NOT write application code or modify source files.
+- You MUST save your guidance to `/workspace/leader_guidance.md`.
 - Be specific — reference exact file paths and function names.
 - Keep guidance concise (under 500 words).
 """

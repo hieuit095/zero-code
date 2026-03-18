@@ -389,6 +389,8 @@ export interface QaReportData {
   retryable: boolean;
   scores?: QaDimensionalScores;
   failingDimensions?: string[];
+  /** Full descriptive strings e.g. 'code_quality=25 (min 70)' — for logging/tooltips. */
+  failingDimensionDetails?: string[];
 }
 
 /**

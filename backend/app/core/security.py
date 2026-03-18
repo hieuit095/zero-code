@@ -49,12 +49,17 @@ def _get_jwt_secret() -> str:
 # ─── Token Generation ────────────────────────────────────────────────────────
 
 
-def generate_mcp_token(run_id: str, expiry_minutes: int = _JWT_EXPIRY_MINUTES) -> str:
+def generate_mcp_token(
+    run_id: str,
+    workspace_id: str = "repo-main",
+    expiry_minutes: int = _JWT_EXPIRY_MINUTES,
+) -> str:
     """
-    Generate a short-lived JWT scoped to a specific run.
+    Generate a short-lived JWT scoped to a specific run and workspace.
 
     Claims:
       - sub: run_id
+      - wid: workspace_id (PHASE 1 HARDENING — multi-tenant isolation)
       - purpose: "mcp_facade"
       - iat: issued at
       - exp: expiry time
@@ -63,6 +68,7 @@ def generate_mcp_token(run_id: str, expiry_minutes: int = _JWT_EXPIRY_MINUTES) -
     now = datetime.now(UTC)
     payload = {
         "sub": run_id,
+        "wid": workspace_id,
         "purpose": "mcp_facade",
         "iat": now,
         "exp": now + timedelta(minutes=expiry_minutes),
@@ -87,6 +93,9 @@ def validate_mcp_token(token: str) -> dict[str, Any]:
     """
     Validate a JWT and return the decoded claims.
 
+    PHASE 1 HARDENING: Now also verifies the ``wid`` (workspace_id) claim
+    exists, ensuring every MCP tool call is scoped to a specific workspace.
+
     Raises:
       HTTPException 401 if token is invalid, expired, or malformed.
     """
@@ -107,12 +116,17 @@ def validate_mcp_token(token: str) -> dict[str, Any]:
     if not run_id:
         raise HTTPException(status_code=401, detail="Token missing run_id claim")
 
+    # PHASE 1 HARDENING: Verify workspace_id claim exists
+    workspace_id = payload.get("wid")
+    if not workspace_id:
+        raise HTTPException(status_code=401, detail="Token missing workspace_id (wid) claim")
+
     return payload
 
 
 # ─── DB-Backed Run Validation ─────────────────────────────────────────────────
 
-_ACTIVE_STATUSES = {"queued", "planning", "delegating", "developing", "verifying", "retrying"}
+_ACTIVE_STATUSES = {"queued", "planning", "delegating", "developing", "verifying", "retrying", "leader-review"}
 
 
 async def _verify_run_is_active(run_id: str) -> None:
@@ -144,9 +158,13 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 async def require_mcp_auth(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-) -> str:
+) -> tuple[str, str]:
     """
     FastAPI dependency that extracts and validates the MCP JWT.
+
+    PHASE 1 HARDENING: Now returns ``(run_id, workspace_id)`` instead of
+    just ``run_id``.  The ``workspace_id`` is extracted from the ``wid``
+    JWT claim, ensuring every MCP tool call is scoped to its own sandbox.
 
     SECURITY: JWT Bearer token is STRICTLY REQUIRED. The legacy X-Run-Id
     header fallback has been removed to close the authentication bypass.
@@ -156,7 +174,7 @@ async def require_mcp_auth(
     share the same DB, making this check consistent across processes.
 
     Returns:
-      The validated run_id.
+      A ``(run_id, workspace_id)`` tuple.
 
     Raises:
       HTTPException 401 if the token is missing, invalid, or expired.
@@ -169,8 +187,9 @@ async def require_mcp_auth(
 
     payload = validate_mcp_token(credentials.credentials)
     run_id = payload["sub"]
+    workspace_id = payload["wid"]
 
     # Verify run is active in the DATABASE (not in-memory)
     await _verify_run_is_active(run_id)
 
-    return run_id
+    return run_id, workspace_id

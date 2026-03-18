@@ -157,6 +157,7 @@ class DevAgent:
         goal: str,
         context: dict[str, Any] | None = None,
         llm_config: dict[str, Any] | None = None,
+        mentorship_context: dict[str, Any] | None = None,
     ) -> DevAgentResult:
         """
         Execute the Dev agent for a given goal.
@@ -167,6 +168,11 @@ class DevAgent:
             context: Optional additional context (workspace files, etc.)
             llm_config: Dynamic LLM configuration from the database:
                         {"model": str, "provider": str, "api_key": str, "base_url": str | None}
+            mentorship_context: PHASE 2 FIX (Task 2) - Structured mentorship
+                               context dict from MentorshipMessage.to_context_dict().
+                               If provided, injected as a separate conversation
+                               message before the goal to give the Dev agent
+                               formal context about the Tech Lead's guidance.
 
         Returns:
             DevAgentResult with status, changed files, and summary.
@@ -249,6 +255,20 @@ class DevAgent:
                 f"[Run: {run_id} | Task: {task_id} | Attempt: {attempt}]\n\n"
                 f"{goal}"
             )
+
+            # PHASE 2 FIX (Task 2): If mentorship context is provided,
+            # inject it as a separate structured message BEFORE the goal.
+            # This gives the Dev agent formal context from the Tech Lead's
+            # guidance without flattening it into the goal string.
+            if mentorship_context:
+                mentor_msg = (
+                    f"[MENTORSHIP CONTEXT from {mentorship_context.get('source_agent', 'tech-lead')}]\n"
+                    f"Failed attempts: {mentorship_context.get('failed_attempts', 0)}\n"
+                    f"Critique: {mentorship_context.get('critique_artifact', '')}\n"
+                    f"Guidance: {mentorship_context.get('reference_artifact', '')}\n\n"
+                    f"Read BOTH artifacts before implementing fixes."
+                )
+                conversation.send_message(mentor_msg)
 
             conversation.send_message(user_message)
             conversation.run()

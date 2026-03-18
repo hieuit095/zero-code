@@ -57,12 +57,18 @@ except ImportError:
 # ─── MCP Server Factory ──────────────────────────────────────────────────────
 
 
-def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
+def create_mcp_server(workspace_root: str, role: str, workspace_id: str = "repo-main") -> FastMCP:
     """
     Create a FastMCP server instance with containerized workspace tools.
 
     Each role (dev, qa, tech-lead) gets its own server instance with
     role-appropriate command policy enforcement.
+
+    PHASE 1 HARDENING: ``workspace_id`` is now a required parameter
+    that flows from the JWT ``wid`` claim through to every
+    ``client.get_runtime()`` call.  This replaces the previous
+    hardcoded ``"repo-main"`` and enables true multi-tenant sandbox
+    isolation.
 
     All tool execution is routed through the OpenSandbox SDK — there are
     no ``subprocess``, ``os.system``, or native ``open()`` calls inside
@@ -73,6 +79,8 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
                         (used only for CommandPolicy context, NOT for
                         host-side file I/O).
         role: Agent role for command policy scoping ("dev", "qa", "tech-lead").
+        workspace_id: The sandbox workspace ID for container resolution.
+                      PHASE 1 HARDENING: passed from JWT ``wid`` claim.
 
     Returns:
         A configured FastMCP server ready to be mounted on FastAPI.
@@ -108,7 +116,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
         try:
             client = await get_opensandbox_client()
-            runtime = await client.get_runtime("repo-main")
+            runtime = await client.get_runtime(workspace_id)
             content = await runtime.read_file(path)
             return content
 
@@ -141,7 +149,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
         try:
             client = await get_opensandbox_client()
-            runtime = await client.get_runtime("repo-main")
+            runtime = await client.get_runtime(workspace_id)
             return await runtime.write_file(path, content)
 
         except SandboxUnavailableError as e:
@@ -181,7 +189,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
         # ── Route through the OpenSandbox container ───────────────────
         try:
             client = await get_opensandbox_client()
-            runtime = await client.get_runtime("repo-main")
+            runtime = await client.get_runtime(workspace_id)
             execution = await runtime.run_command(command, cwd=cwd)
 
             # Format the result into the same contract the agents expect

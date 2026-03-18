@@ -27,6 +27,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import re
+from pydantic import BaseModel, field_validator
+
 from ..agents.dev_agent import DevAgent, DevAgentResult
 from ..agents.leader_agent import AgentTask, LeaderAgent, LeaderAgentResult
 from ..agents.qa_agent import QaAgent, QaAgentResult
@@ -78,7 +81,7 @@ class MentorshipMessage:
         attribution — unlike the previous raw f-string injection.
         """
         return (
-            f"[MENTORSHIP MESSAGE — from: {self.source_agent}, "
+            f"[MENTORSHIP MESSAGE \u2014 from: {self.source_agent}, "
             f"to: {self.target_agent}]\n\n"
             f"Your previous {self.failed_attempts} attempt(s) FAILED QA "
             f"verification. The Tech Lead has diagnosed the root cause and "
@@ -92,6 +95,100 @@ class MentorshipMessage:
             f"--- END GUIDANCE ---\n\n"
             f"Original task:\n{self.original_goal}"
         )
+
+    def to_context_dict(self) -> dict[str, Any]:
+        """Serialize into a structured context dict for SDK message injection.
+
+        PHASE 2 FIX: Instead of flattening to a single prompt string,
+        this produces a structured dict that DevAgent.run() can inject
+        as a separate conversation message with proper role attribution.
+        """
+        return {
+            "type": "mentorship",
+            "source_agent": self.source_agent,
+            "target_agent": self.target_agent,
+            "failed_attempts": self.failed_attempts,
+            "guidance_text": self.guidance_text,
+            "reference_artifact": self.reference_artifact,
+            "critique_artifact": self.critique_artifact,
+            "original_goal": self.original_goal,
+        }
+
+
+# ─── Pydantic-Validated Score Parser (Phase 2 Task 3) ─────────────────────────
+
+# Regex pattern for strings like "code_quality=25 (min 70)"
+_FAILING_DIM_PATTERN = re.compile(
+    r"^(?P<name>[a-z_]+)=(?P<score>\d+)\s*\(min\s+(?P<threshold>\d+)\)$"
+)
+
+
+class FailingDimension(BaseModel):
+    """Structured representation of a single failing QA dimension.
+
+    PHASE 2 FIX: Replaces fragile ``dim.split('=')[1].split(' ')[0]``
+    string manipulation with Pydantic-validated parsing.  This ensures
+    that malformed dimension strings cause a clear ValidationError
+    instead of a silent IndexError that crashes the orchestrator.
+
+    Expected input format: ``"code_quality=25 (min 70)"``
+    """
+
+    name: str          # e.g. "code_quality"
+    score: int         # e.g. 25
+    threshold: int     # e.g. 70
+    raw: str = ""      # Original string for logging
+
+    @field_validator("score", "threshold")
+    @classmethod
+    def _score_in_range(cls, v: int) -> int:
+        if not (0 <= v <= 100):
+            raise ValueError(f"Score must be 0-100, got {v}")
+        return v
+
+    @property
+    def is_catastrophic(self) -> bool:
+        """Check if this score is below the catastrophic rollback threshold."""
+        from ..services.openhands_client import CATASTROPHIC_SCORE_THRESHOLD
+        return self.score < CATASTROPHIC_SCORE_THRESHOLD
+
+
+def parse_failing_dimensions(raw_dims: list[str]) -> list[FailingDimension]:
+    """Parse raw failing dimension strings into validated models.
+
+    PHASE 2 FIX: Robust parser that handles:
+      - Normal format: ``"code_quality=25 (min 70)"``
+      - Malformed strings: logged and skipped (never crashes)
+      - Empty lists: returns empty list
+
+    Returns:
+        List of validated FailingDimension objects. Malformed entries
+        are logged and excluded.
+    """
+    results: list[FailingDimension] = []
+    for raw in raw_dims:
+        match = _FAILING_DIM_PATTERN.match(raw.strip())
+        if match:
+            try:
+                dim = FailingDimension(
+                    name=match.group("name"),
+                    score=int(match.group("score")),
+                    threshold=int(match.group("threshold")),
+                    raw=raw,
+                )
+                results.append(dim)
+            except Exception:
+                logger.warning(
+                    "FailingDimension validation failed for '%s'", raw,
+                    exc_info=True,
+                )
+        else:
+            logger.warning(
+                "Unparseable failing dimension string: '%s' "
+                "(expected format: 'name=score (min threshold)')",
+                raw,
+            )
+    return results
 
 
 # ─── Run States ───────────────────────────────────────────────────────────────
@@ -161,6 +258,7 @@ class TaskDelegator:
         total_tasks: int,
         goal: str,
         base_progress: int,
+        workspace_id: str, # Added workspace_id
         llm_configs: dict[str, dict[str, Any]] | None = None,
         max_retries: int = MAX_QA_RETRIES,
     ) -> None:
@@ -173,6 +271,7 @@ class TaskDelegator:
         self._total = total_tasks
         self._goal = goal
         self._base_progress = base_progress
+        self._workspace_id = workspace_id # Stored workspace_id
         self._llm_configs = llm_configs or {}
         self._max_retries = max_retries
 
@@ -242,6 +341,10 @@ class TaskDelegator:
                         failed_attempts=attempt,
                         original_goal=self._goal,
                     )
+                    # PHASE 2 FIX (Task 2): Pass structured mentorship
+                    # context dict to DevAgent instead of flattening
+                    # to a raw prompt string.
+                    mentorship_context = mentorship_msg.to_context_dict()
                     dev_input = mentorship_msg.to_dev_prompt()
 
                 elif attempt > self._max_retries:
@@ -439,7 +542,7 @@ class TaskDelegator:
         try:
             from ..services.openhands_client import get_opensandbox_client
             client = await get_opensandbox_client()
-            runtime = await client.get_runtime("repo-main")
+            runtime = await client.get_runtime(self._workspace_id)
             content = await runtime.read_file("/workspace/critique_report.md")
 
             await self._mgr._emit_fs_update(
@@ -520,33 +623,50 @@ class TaskDelegator:
 
         guidance = mentor_result.raw_output or mentor_result.summary or ""
 
-        # ── Persist guidance via MCP tool boundary ──────────────────
-        # PHASE 1 SECURITY FIX: The orchestrator must NOT bypass the
-        # agent tool boundary by calling runtime.write_file() directly.
-        # Instead, we route through the same MCP write_file tool that
-        # agents use, ensuring CommandPolicy, path normalization, and
-        # sandbox isolation are uniformly enforced.
+        # ── Read guidance artifact from sandbox (PHASE 2 FIX: Task 1) ──
+        # The Leader agent should write leader_guidance.md natively via
+        # its own str_replace_editor tool during the Conversation lifecycle.
+        # The orchestrator reads it back instead of puppeteering a write.
+        # If the Leader didn't write it, we fall back to writing via MCP.
         try:
-            from ..agents.mcp_tools import create_mcp_server
-
-            mcp_server = create_mcp_server(
-                workspace_root="",  # Not used for host I/O
-                role="tech-lead",
+            from ..services.openhands_client import get_opensandbox_client
+            client = await get_opensandbox_client()
+            runtime = await client.get_runtime(self._workspace_id)
+            written_guidance = await runtime.read_file(
+                "/workspace/leader_guidance.md",
             )
-            # Invoke the write_file tool registered on the MCP server.
-            # FastMCP exposes tools via .call_tool() which runs the
-            # registered async function with full policy enforcement.
-            write_result = await mcp_server.call_tool(
-                "write_file",
-                {"path": "/workspace/leader_guidance.md", "content": guidance},
-            )
+            if written_guidance.strip():
+                guidance = written_guidance
+                logger.info(
+                    "Read leader_guidance.md (%d bytes) from sandbox for run %s",
+                    len(guidance), self._run_id,
+                )
+        except FileNotFoundError:
+            # Leader didn't write the file — write raw_output as fallback
             logger.info(
-                "Wrote leader_guidance.md (%d bytes) via MCP tool for run %s: %s",
-                len(guidance), self._run_id, write_result,
+                "Leader did not write leader_guidance.md — "
+                "writing raw_output as fallback for run %s",
+                self._run_id,
             )
+            try:
+                from ..agents.mcp_tools import create_mcp_server
+                mcp_server = create_mcp_server(
+                    workspace_root="",
+                    role="tech-lead",
+                    workspace_id=self._workspace_id,
+                )
+                await mcp_server.call_tool(
+                    "write_file",
+                    {"path": "/workspace/leader_guidance.md", "content": guidance},
+                )
+            except Exception:
+                logger.warning(
+                    "Fallback write of leader_guidance.md failed for run %s",
+                    self._run_id, exc_info=True,
+                )
         except Exception:
             logger.warning(
-                "Failed to write leader_guidance.md via MCP for run %s",
+                "Failed to read leader_guidance.md from sandbox for run %s",
                 self._run_id, exc_info=True,
             )
 
@@ -593,7 +713,7 @@ class TaskDelegator:
         try:
             from ..services.openhands_client import get_opensandbox_client
             client = await get_opensandbox_client()
-            runtime = await client.get_runtime("repo-main")
+            runtime = await client.get_runtime(self._workspace_id)
             snap_id = await runtime.snapshot()
             if snap_id:
                 logger.info(
@@ -611,28 +731,14 @@ class TaskDelegator:
     ) -> None:
         """Roll back to pre-Dev snapshot if any dimension is catastrophically low.
 
-        PHASE 3: A catastrophic score (default < 40) means the Dev agent's
-        changes are so broken that incremental patching would waste tokens.
-        Discarding the corrupted state and restoring the clean snapshot is
-        cheaper and more reliable.
+        PHASE 3 / PHASE 2 FIX: Uses ``parse_failing_dimensions()`` Pydantic
+        model instead of fragile string splitting.  A catastrophic score
+        (default < 40) triggers a full snapshot rollback.
         """
-        from ..services.openhands_client import (
-            CATASTROPHIC_SCORE_THRESHOLD,
-            get_opensandbox_client,
-        )
+        from ..services.openhands_client import get_opensandbox_client
 
-        # Parse numeric scores from the failing_dims strings
-        # Format: "code_quality=25 (min 70)"
-        needs_rollback = False
-        for dim in failing_dims:
-            try:
-                score_str = dim.split("=")[1].split(" ")[0]
-                score = int(score_str)
-                if score < CATASTROPHIC_SCORE_THRESHOLD:
-                    needs_rollback = True
-                    break
-            except (IndexError, ValueError):
-                continue
+        parsed_dims = parse_failing_dimensions(failing_dims)
+        needs_rollback = any(dim.is_catastrophic for dim in parsed_dims)
 
         if not needs_rollback:
             return
@@ -670,7 +776,7 @@ class RunManager:
     """
     SDK-native task delegation orchestrator.
 
-    Uses `TaskDelegator` to manage the Dev→QA handoff as a structured
+    Uses ``TaskDelegator`` to manage the Dev->QA handoff as a structured
     delegation unit, replacing the previous manual `while` loops.
 
     ALL state is persisted to the DATABASE. No in-memory dict.
@@ -969,10 +1075,14 @@ class RunManager:
         workspace_id = run_model.workspace_id
         start_time = time.monotonic()
 
-        # Generate JWT for MCP facade (legacy — retained for backward compat)
+        # Generate JWT for MCP facade with workspace_id
+        # PHASE 1 HARDENING: workspace_id is now encoded in the JWT 'wid'
+        # claim so MCP tools resolve the correct sandbox container.
         # AUDIT FIX: Extended from 30 min to 12 hours (720 min) to prevent
         # token expiration during long-running multi-agent compile/retry loops.
-        mcp_token = generate_mcp_token(run_id, expiry_minutes=720)
+        mcp_token = generate_mcp_token(
+            run_id, workspace_id=workspace_id, expiry_minutes=720,
+        )
         # NOTE: set_run_token removed — native SDK tools no longer use JWT tokens.
 
         # ── Load dynamic LLM config from DB (with per-run merge) ───
@@ -1085,6 +1195,7 @@ class RunManager:
                     total_tasks=total_tasks,
                     goal=task_goal,
                     base_progress=base_progress,
+                    workspace_id=workspace_id,
                     llm_configs=llm_configs,
                     max_retries=MAX_QA_RETRIES,
                 )
