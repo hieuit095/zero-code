@@ -32,6 +32,11 @@ class RunModel(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     total_cost: Mapped[float] = mapped_column(Float, default=0.0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    agent_config: Mapped[Optional[Any]] = mapped_column(
+        JSON, nullable=True, default=None,
+        comment="Per-run LLM routing config from frontend (JSON). "
+                "Merged into _load_llm_configs at execution time.",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )

@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,58 @@ logger = logging.getLogger(__name__)
 
 MAX_QA_RETRIES = 2
 MAX_LEADER_REPLANS = 2
+
+
+# ─── Formal Mentorship Message Protocol ───────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MentorshipMessage:
+    """Formally typed agent-to-agent message for the Mentorship Loop.
+
+    PHASE 2 FIX: Replaces ad-hoc f-string concatenation with a structured
+    protocol object. The Dev agent receives this as a formatted prompt
+    injection, but the construct is explicit, auditable, and traceable.
+
+    Attributes:
+        source_agent: The role that authored this message ("tech-lead").
+        target_agent: The role that should consume it ("dev").
+        guidance_text: The raw mentorship guidance from the Leader.
+        reference_artifact: Path to the guidance artifact in the sandbox.
+        critique_artifact: Path to the critique that triggered mentorship.
+        failed_attempts: Number of Dev attempts that triggered escalation.
+        original_goal: The original task goal for context preservation.
+    """
+
+    source_agent: str
+    target_agent: str
+    guidance_text: str
+    reference_artifact: str
+    critique_artifact: str
+    failed_attempts: int
+    original_goal: str
+
+    def to_dev_prompt(self) -> str:
+        """Serialize this message into a structured prompt for the Dev agent.
+
+        The output is deterministic, auditable, and includes clear source
+        attribution — unlike the previous raw f-string injection.
+        """
+        return (
+            f"[MENTORSHIP MESSAGE — from: {self.source_agent}, "
+            f"to: {self.target_agent}]\n\n"
+            f"Your previous {self.failed_attempts} attempt(s) FAILED QA "
+            f"verification. The Tech Lead has diagnosed the root cause and "
+            f"provided targeted architectural guidance.\n\n"
+            f"REQUIRED ACTIONS:\n"
+            f"  1. Read the critique: {self.critique_artifact}\n"
+            f"  2. Read the guidance: {self.reference_artifact}\n"
+            f"  3. Apply the EXACT steps described in the guidance.\n\n"
+            f"--- LEADER GUIDANCE ---\n"
+            f"{self.guidance_text}\n"
+            f"--- END GUIDANCE ---\n\n"
+            f"Original task:\n{self.original_goal}"
+        )
 
 
 # ─── Run States ───────────────────────────────────────────────────────────────
@@ -178,18 +231,18 @@ class TaskDelegator:
                     mentor_guidance = await self._delegate_to_leader_mentor(
                         failing_dims,
                     )
-                    dev_input = (
-                        f"URGENT: Tech Lead intervention. Your previous "
-                        f"{attempt} attempts FAILED QA verification.\n\n"
-                        f"The Tech Lead has analyzed the failures and "
-                        f"provided an architectural fix. Read "
-                        f"/workspace/leader_guidance.md and apply the "
-                        f"EXACT steps described.\n\n"
-                        f"--- LEADER GUIDANCE ---\n"
-                        f"{mentor_guidance}\n"
-                        f"--- END GUIDANCE ---\n\n"
-                        f"Original task:\n{self._goal}"
+                    # PHASE 2 FIX: Construct a formally typed
+                    # MentorshipMessage instead of raw f-string injection.
+                    mentorship_msg = MentorshipMessage(
+                        source_agent="tech-lead",
+                        target_agent="dev",
+                        guidance_text=mentor_guidance,
+                        reference_artifact="/workspace/leader_guidance.md",
+                        critique_artifact="/workspace/critique_report.md",
+                        failed_attempts=attempt,
+                        original_goal=self._goal,
                     )
+                    dev_input = mentorship_msg.to_dev_prompt()
 
                 elif attempt > self._max_retries:
                     # ── POST-MENTORSHIP FAILURE ───────────────────────
@@ -467,21 +520,33 @@ class TaskDelegator:
 
         guidance = mentor_result.raw_output or mentor_result.summary or ""
 
-        # ── Persist guidance to workspace via OpenSandbox SDK ────────
-        # OPENSANDBOX MIGRATION: Uses OpenSandboxClient.get_runtime().write_file()
-        # inside the containerized sandbox.
+        # ── Persist guidance via MCP tool boundary ──────────────────
+        # PHASE 1 SECURITY FIX: The orchestrator must NOT bypass the
+        # agent tool boundary by calling runtime.write_file() directly.
+        # Instead, we route through the same MCP write_file tool that
+        # agents use, ensuring CommandPolicy, path normalization, and
+        # sandbox isolation are uniformly enforced.
         try:
-            from ..services.openhands_client import get_opensandbox_client
-            client = await get_opensandbox_client()
-            runtime = await client.get_runtime("repo-main")
-            await runtime.write_file("/workspace/leader_guidance.md", guidance)
+            from ..agents.mcp_tools import create_mcp_server
+
+            mcp_server = create_mcp_server(
+                workspace_root="",  # Not used for host I/O
+                role="tech-lead",
+            )
+            # Invoke the write_file tool registered on the MCP server.
+            # FastMCP exposes tools via .call_tool() which runs the
+            # registered async function with full policy enforcement.
+            write_result = await mcp_server.call_tool(
+                "write_file",
+                {"path": "/workspace/leader_guidance.md", "content": guidance},
+            )
             logger.info(
-                "Wrote leader_guidance.md (%d bytes) via SDK for run %s",
-                len(guidance), self._run_id,
+                "Wrote leader_guidance.md (%d bytes) via MCP tool for run %s: %s",
+                len(guidance), self._run_id, write_result,
             )
         except Exception:
             logger.warning(
-                "Failed to write leader_guidance.md for run %s",
+                "Failed to write leader_guidance.md via MCP for run %s",
                 self._run_id, exc_info=True,
             )
 
@@ -627,8 +692,18 @@ class RunManager:
     ) -> dict[str, Any]:
         run_id = f"run_{uuid4().hex[:12]}"
 
+        # PHASE 2 FIX: Persist the user's agent_config to the database
+        # so _load_llm_configs can merge it at execution time.
         async with async_session() as session:
-            await RunStore.create_run(session, run_id, goal, workspace_id)
+            await RunStore.create_run(
+                session, run_id, goal, workspace_id,
+                agent_config=agent_config,
+            )
+
+        logger.info(
+            "Created run %s with agent_config: %s",
+            run_id, "yes" if agent_config else "none (using global defaults)",
+        )
 
         return {
             "run_id": run_id,
@@ -699,9 +774,21 @@ class RunManager:
                 run_id, role, exc_info=True,
             )
 
-    async def _load_llm_configs(self) -> dict[str, dict[str, Any]]:
+    async def _load_llm_configs(
+        self, run_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """
         Fetch agent routing + decrypted API keys from the database.
+
+        PHASE 2 FIX: If a ``run_id`` is provided, the per-run ``agent_config``
+        stored in the ``runs`` table is loaded and merged OVER the global
+        ``llm_routing`` defaults. This ensures the user's frontend model
+        selections are actually honored at execution time.
+
+        Merge priority (highest wins):
+          1. Per-run ``agent_config`` (from frontend → DB)
+          2. Global ``LLMRoutingModel`` (from Settings UI → DB)
+          3. Hardcoded defaults (gpt-4o / openai)
 
         Returns a dict keyed by role ("leader", "dev", "qa") with sub-keys:
           - model: str (e.g., "gpt-4o")
@@ -709,9 +796,23 @@ class RunManager:
           - api_key: str (decrypted, or empty)
           - base_url: str | None
         """
+        per_run_config: dict[str, Any] | None = None
+
         async with async_session() as session:
             from sqlalchemy import select
-            # Fetch routing config
+
+            # Fetch per-run agent_config if run_id provided
+            if run_id:
+                from ..db.models import RunModel as _RunModel
+                run_row = await session.get(_RunModel, run_id)
+                if run_row and run_row.agent_config:
+                    per_run_config = run_row.agent_config
+                    logger.info(
+                        "Loaded per-run agent_config for %s: %s",
+                        run_id, list(per_run_config.keys()),
+                    )
+
+            # Fetch global routing config
             result = await session.execute(select(LLMRoutingModel))
             routing = result.scalar_one_or_none()
 
@@ -728,7 +829,8 @@ class RunManager:
                 decrypted = ""
             provider_keys[row.provider] = (decrypted, row.base_url)
 
-        # Use routing config or defaults
+        # Layer 3: Hardcoded defaults
+        # Layer 2: Global LLMRoutingModel overrides
         if routing is None:
             routing_map = {
                 "leader": ("gpt-4o", "openai"),
@@ -752,11 +854,32 @@ class RunManager:
                 "base_url": base_url,
             }
 
+        # Layer 1: Per-run agent_config overrides (highest priority)
+        # Frontend sends: { "tech-lead": {"model": ".."}, "dev": {..}, "qa": {..} }
+        if per_run_config:
+            role_map = {"tech-lead": "leader", "leader": "leader", "dev": "dev", "qa": "qa"}
+            for frontend_role, overrides in per_run_config.items():
+                if not isinstance(overrides, dict):
+                    continue
+                internal_role = role_map.get(frontend_role, frontend_role)
+                if internal_role in configs:
+                    if "model" in overrides:
+                        configs[internal_role]["model"] = overrides["model"]
+                    if "provider" in overrides:
+                        configs[internal_role]["provider"] = overrides["provider"]
+                        # Re-resolve API key for the overridden provider
+                        new_key, new_url = provider_keys.get(
+                            overrides["provider"], ("", None)
+                        )
+                        configs[internal_role]["api_key"] = new_key
+                        configs[internal_role]["base_url"] = new_url
+
         logger.info(
-            "Loaded LLM configs: Leader=%s/%s Dev=%s/%s QA=%s/%s",
+            "Loaded LLM configs: Leader=%s/%s Dev=%s/%s QA=%s/%s (per-run=%s)",
             configs["leader"]["model"], configs["leader"]["provider"],
             configs["dev"]["model"], configs["dev"]["provider"],
             configs["qa"]["model"], configs["qa"]["provider"],
+            "yes" if per_run_config else "no",
         )
         return configs
 
@@ -852,8 +975,8 @@ class RunManager:
         mcp_token = generate_mcp_token(run_id, expiry_minutes=720)
         # NOTE: set_run_token removed — native SDK tools no longer use JWT tokens.
 
-        # ── Load dynamic LLM config from DB ────────────────────────
-        llm_configs = await self._load_llm_configs()
+        # ── Load dynamic LLM config from DB (with per-run merge) ───
+        llm_configs = await self._load_llm_configs(run_id=run_id)
 
         # Counters tracked locally during this execution (not cross-process)
         leader_replans = 0

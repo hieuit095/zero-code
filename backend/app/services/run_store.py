@@ -29,12 +29,14 @@ class RunStore:
         goal: str,
         workspace_id: str = "repo-main",
         status: str = "queued",
+        agent_config: dict | None = None,
     ) -> RunModel:
         run = RunModel(
             id=run_id,
             goal=goal,
             workspace_id=workspace_id,
             status=status,
+            agent_config=agent_config,
         )
         session.add(run)
         await session.commit()

@@ -361,11 +361,39 @@ class _WorkspaceRuntime:
 
 
 def _normalize_path(path: str) -> str:
-    """Ensure path uses the /workspace convention inside the container."""
-    if path.startswith("/workspace/") or path == "/workspace":
-        return path
-    # Treat as relative to /workspace
-    return f"/workspace/{path.lstrip('/')}"
+    """Ensure path is strictly jailed inside ``/workspace``.
+
+    SECURITY FIX (Phase 1): The previous implementation blindly used
+    ``lstrip('/')`` which allowed ``../../`` sequences to escape the
+    ``/workspace`` boundary (e.g. ``../../etc/shadow`` resolved to
+    ``/workspace/../../etc/shadow`` → ``/etc/shadow``).
+
+    The new implementation:
+      1. Joins the raw path against ``/workspace`` (POSIX convention).
+      2. Resolves ``..`` and ``.`` components via ``posixpath.normpath``.
+      3. Validates the resolved path starts with ``/workspace/`` or
+         equals ``/workspace``.
+      4. Raises ``ValueError`` on any escape attempt — the caller
+         surfaces this as a ``FileNotFoundError`` or ``SandboxUnavailableError``.
+    """
+    import posixpath
+
+    # Step 1: If path is already absolute, resolve it directly.
+    #         If relative, join it under /workspace.
+    if path.startswith("/"):
+        resolved = posixpath.normpath(path)
+    else:
+        resolved = posixpath.normpath(posixpath.join("/workspace", path))
+
+    # Step 2: Strict jail check — the resolved path MUST be /workspace
+    #         or start with /workspace/ (a proper child).
+    if resolved != "/workspace" and not resolved.startswith("/workspace/"):
+        raise ValueError(
+            f"Path traversal blocked: '{path}' resolved to '{resolved}' "
+            f"which escapes the /workspace boundary."
+        )
+
+    return resolved
 
 
 # ─── OpenSandboxClient ───────────────────────────────────────────────────────

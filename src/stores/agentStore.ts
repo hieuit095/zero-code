@@ -12,6 +12,7 @@
 
 import { create } from 'zustand';
 import type { AgentMessage, Task, AgentRole, AgentStatus, AgentStatuses, ActiveActivities } from '../types';
+import type { QaDimensionalScores } from '../types/runEvents';
 
 interface QaRetryState {
   taskId: string;
@@ -20,7 +21,9 @@ interface QaRetryState {
   status: 'failed' | 'retrying' | 'passed';
   failingCommand: string | null;
   defectSummary: string | null;
-  scores: Record<string, number> | null;
+  // PHASE 3 FIX: Strictly typed 4-dimensional QA scores.
+  // Prevents incomplete payloads from silently degrading the UI.
+  scores: QaDimensionalScores | null;
   failingDimensions: string[];
 }
 

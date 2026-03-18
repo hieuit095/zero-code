@@ -20,7 +20,7 @@
 
 
 import { useState } from 'react';
-import { Bot, Sparkles, Settings, ChevronDown, Zap, RotateCcw } from 'lucide-react';
+import { Bot, Sparkles, Settings, ChevronDown, Zap, RotateCcw, AlertTriangle, X } from 'lucide-react';
 import { useRunConnection } from '../hooks/useRunConnection';
 import { useAgentStore } from '../stores/agentStore';
 import { useSettingsStore } from '../stores/settingsStore';
@@ -31,7 +31,8 @@ export function Header() {
   const [goal, setGoal] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('agent-setup');
-  const { startRun, disconnect, sendMessage, isConnected } = useRunConnection();
+  const [errorDismissed, setErrorDismissed] = useState(false);
+  const { startRun, disconnect, sendMessage, isConnected, error: runError } = useRunConnection();
   const runStatus = useAgentStore((s) => s.runStatus);
   const progress = useAgentStore((s) => s.runProgress);
   const resetAgent = useAgentStore((s) => s.resetToInitial);
@@ -63,7 +64,11 @@ export function Header() {
   const handleReset = () => {
     disconnect();
     resetAgent();
+    setErrorDismissed(false);
   };
+
+  // PHASE 3 FIX: Surface fatal run:error messages visibly.
+  const showErrorBanner = !!runError && !errorDismissed;
 
   const showDisconnectBanner = connectionStatus === 'disconnected' || connectionStatus === 'reconnecting';
 
@@ -172,6 +177,23 @@ export function Header() {
           {connectionStatus === 'reconnecting'
             ? 'Connection lost. Reconnecting…'
             : 'Disconnected from server.'}
+        </div>
+      )}
+      {/* PHASE 3 FIX: Global error banner for fatal run:error events */}
+      {showErrorBanner && (
+        <div className="flex items-center gap-3 px-4 py-2 text-sm font-medium bg-red-500/15 border-b border-red-500/30 text-red-200 animate-in slide-in-from-top-1">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <span className="flex-1 truncate">
+            <span className="font-semibold text-red-300">Run Failed: </span>
+            {runError}
+          </span>
+          <button
+            onClick={() => setErrorDismissed(true)}
+            className="p-0.5 rounded hover:bg-red-500/20 text-red-400 hover:text-red-200 transition-colors shrink-0"
+            title="Dismiss error"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
     </>

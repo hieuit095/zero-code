@@ -348,6 +348,20 @@ export interface QaReportIssue {
 }
 
 /**
+ * Strictly typed QA dimensional scores.
+ *
+ * PHASE 3 FIX: Replaces `Record<string, number>` with an explicit
+ * 4-dimensional contract. Incomplete payloads will now trigger
+ * TypeScript errors instead of silently degrading the UI.
+ */
+export interface QaDimensionalScores {
+  code_quality: number;
+  requirements: number;
+  robustness: number;
+  security: number;
+}
+
+/**
  * `qa:report` payload from `plan.md` section 3.9.
  *
  * Expected JSON payload:
@@ -373,7 +387,7 @@ export interface QaReportData {
   rawLogTail: string[];
   errors: QaReportIssue[];
   retryable: boolean;
-  scores?: Record<string, number>;
+  scores?: QaDimensionalScores;
   failingDimensions?: string[];
 }
 
@@ -396,7 +410,7 @@ export interface QaPassedData {
     exitCode: number;
   }>;
   summary: string;
-  scores?: Record<string, number>;
+  scores?: QaDimensionalScores;
 }
 
 export type ConnectionReadyEvent = RunEventEnvelope<'connection:ready', ConnectionReadyData>;
