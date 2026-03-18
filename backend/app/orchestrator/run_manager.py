@@ -140,6 +140,9 @@ class TaskDelegator:
         last_files: list[str] = []
 
         for attempt in range(1, self._max_retries + 3):
+            # ── SNAPSHOT: save pristine state before Dev mutates ──────
+            await self._snapshot_before_dev(attempt)
+
             # ── DEVELOPING phase ─────────────────────────────────────
             dev_result, last_files = await self._delegate_to_dev(
                 dev_input, attempt,
@@ -160,6 +163,12 @@ class TaskDelegator:
                 reason, is_internal, retryable, failing_dims = qa_outcome
                 if is_internal or not retryable:
                     return "failed", last_files, is_internal
+
+                # ── CATASTROPHIC ROLLBACK CHECK ──────────────────────
+                # If any dimensional score is catastrophically low,
+                # restore the container to pre-Dev state instead of
+                # forcing the Dev agent to manually undo spaghetti.
+                await self._maybe_rollback_catastrophic(failing_dims)
 
                 if attempt == self._max_retries:
                     # ── MENTORSHIP INTERCEPT ──────────────────────────
@@ -238,6 +247,10 @@ class TaskDelegator:
             llm_config=self._llm_configs.get("dev"),
         )
 
+        # Persist LLM metrics from the Dev agent call
+        await self._mgr._persist_agent_metrics(
+            self._run_id, "dev", dev_result.cost, dev_result.total_tokens)
+
         if dev_result.status == "error":
             await self._mgr._emit_agent_message(self._run_id, "dev", "Dev",
                 f"Error: {dev_result.error}")
@@ -294,6 +307,10 @@ class TaskDelegator:
             attempt=attempt, changed_files=dev_result.files_changed,
             llm_config=self._llm_configs.get("qa"),
         )
+
+        # Persist LLM metrics from the QA agent call
+        await self._mgr._persist_agent_metrics(
+            self._run_id, "qa", qa_result.cost, qa_result.total_tokens)
 
         # Emit terminal events
         for check in qa_result.commands:
@@ -359,18 +376,18 @@ class TaskDelegator:
 
     async def _emit_critique_artifact(self) -> None:
         """
-        Read critique_report.md from the workspace via the OpenHands SDK
+        Read critique_report.md from the workspace via the OpenSandbox SDK
         and emit fs:update so it instantly appears in the frontend
         FileExplorer.
 
-        AUDIT REMEDIATION: Uses OpenHandsClient.get_runtime().read_file()
-        instead of host-side Path.exists() / Path.read_text().
+        OPENSANDBOX MIGRATION: Uses OpenSandboxClient.get_runtime().read_file()
+        via the containerized sandbox.
         """
         try:
-            from ..services.openhands_client import get_openhands_client
-            client = get_openhands_client()
-            runtime = client.get_runtime("repo-main")
-            content = runtime.read_file("/workspace/critique_report.md")
+            from ..services.openhands_client import get_opensandbox_client
+            client = await get_opensandbox_client()
+            runtime = await client.get_runtime("repo-main")
+            content = await runtime.read_file("/workspace/critique_report.md")
 
             await self._mgr._emit_fs_update(
                 self._run_id,
@@ -444,16 +461,20 @@ class TaskDelegator:
             mentorship_mode=True,
         )
 
+        # Persist LLM metrics from the Leader mentorship call
+        await self._mgr._persist_agent_metrics(
+            self._run_id, "leader", mentor_result.cost, mentor_result.total_tokens)
+
         guidance = mentor_result.raw_output or mentor_result.summary or ""
 
-        # ── Persist guidance to workspace via OpenHands SDK ─────────
-        # AUDIT REMEDIATION: Uses OpenHandsClient.get_runtime().write_file()
-        # instead of host-side Path.write_text().
+        # ── Persist guidance to workspace via OpenSandbox SDK ────────
+        # OPENSANDBOX MIGRATION: Uses OpenSandboxClient.get_runtime().write_file()
+        # inside the containerized sandbox.
         try:
-            from ..services.openhands_client import get_openhands_client
-            client = get_openhands_client()
-            runtime = client.get_runtime("repo-main")
-            runtime.write_file("/workspace/leader_guidance.md", guidance)
+            from ..services.openhands_client import get_opensandbox_client
+            client = await get_opensandbox_client()
+            runtime = await client.get_runtime("repo-main")
+            await runtime.write_file("/workspace/leader_guidance.md", guidance)
             logger.info(
                 "Wrote leader_guidance.md (%d bytes) via SDK for run %s",
                 len(guidance), self._run_id,
@@ -495,6 +516,86 @@ class TaskDelegator:
         await self._mgr._emit_agent_message(self._run_id, "dev", "Dev",
             f"{retry_reason} — retrying (attempt "
             f"{attempt}/{self._max_retries + 1})...")
+
+    # ─── Snapshot & Rollback ───────────────────────────────────────────────
+
+    async def _snapshot_before_dev(self, attempt: int) -> None:
+        """Take a fast snapshot before the Dev agent mutates the workspace.
+
+        PHASE 3: This allows catastrophic-failure rollback without
+        forcing the LLM to manually revert broken code.
+        """
+        try:
+            from ..services.openhands_client import get_opensandbox_client
+            client = await get_opensandbox_client()
+            runtime = await client.get_runtime("repo-main")
+            snap_id = await runtime.snapshot()
+            if snap_id:
+                logger.info(
+                    "Pre-Dev snapshot for run %s attempt %d: %s",
+                    self._run_id, attempt, snap_id,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to snapshot before Dev attempt %d for run %s",
+                attempt, self._run_id, exc_info=True,
+            )
+
+    async def _maybe_rollback_catastrophic(
+        self, failing_dims: list[str],
+    ) -> None:
+        """Roll back to pre-Dev snapshot if any dimension is catastrophically low.
+
+        PHASE 3: A catastrophic score (default < 40) means the Dev agent's
+        changes are so broken that incremental patching would waste tokens.
+        Discarding the corrupted state and restoring the clean snapshot is
+        cheaper and more reliable.
+        """
+        from ..services.openhands_client import (
+            CATASTROPHIC_SCORE_THRESHOLD,
+            get_opensandbox_client,
+        )
+
+        # Parse numeric scores from the failing_dims strings
+        # Format: "code_quality=25 (min 70)"
+        needs_rollback = False
+        for dim in failing_dims:
+            try:
+                score_str = dim.split("=")[1].split(" ")[0]
+                score = int(score_str)
+                if score < CATASTROPHIC_SCORE_THRESHOLD:
+                    needs_rollback = True
+                    break
+            except (IndexError, ValueError):
+                continue
+
+        if not needs_rollback:
+            return
+
+        try:
+            client = await get_opensandbox_client()
+            runtime = await client.get_runtime("repo-main")
+            restored = await runtime.restore_snapshot()
+            if restored:
+                await self._mgr._emit_agent_message(
+                    self._run_id, "tech-lead", "Tech Lead",
+                    "⚠ Catastrophic QA failure detected — workspace rolled "
+                    "back to pre-Dev snapshot for clean retry.",
+                )
+                logger.info(
+                    "Catastrophic rollback completed for run %s",
+                    self._run_id,
+                )
+            else:
+                logger.warning(
+                    "Catastrophic rollback requested but restore failed "
+                    "for run %s", self._run_id,
+                )
+        except Exception:
+            logger.warning(
+                "Catastrophic rollback error for run %s",
+                self._run_id, exc_info=True,
+            )
 
 
 # ─── Run Manager ──────────────────────────────────────────────────────────────
@@ -574,6 +675,29 @@ class RunManager:
 
     async def _emit(self, run_id: str, event_type: str, data: dict[str, Any]) -> None:
         await self._broker.publish(run_id, event_type, data)
+
+    async def _persist_agent_metrics(
+        self, run_id: str, role: str, cost: float, total_tokens: int,
+    ) -> None:
+        """Increment the run's accumulated LLM cost and token counters."""
+        if cost == 0.0 and total_tokens == 0:
+            return
+        try:
+            async with async_session() as session:
+                await RunStore.update_run_metrics(
+                    session, run_id,
+                    additional_cost=cost,
+                    additional_tokens=total_tokens,
+                )
+            logger.info(
+                "Persisted LLM metrics for run %s [%s]: cost=$%.6f tokens=%d",
+                run_id, role, cost, total_tokens,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist LLM metrics for run %s [%s]",
+                run_id, role, exc_info=True,
+            )
 
     async def _load_llm_configs(self) -> dict[str, dict[str, Any]]:
         """
@@ -760,6 +884,10 @@ class RunManager:
                 llm_config=llm_configs.get("leader"),
             )
 
+            # Persist LLM metrics from the Leader planning call
+            await self._persist_agent_metrics(
+                run_id, "leader", leader_result.cost, leader_result.total_tokens)
+
             if leader_result.status == "error" or not leader_result.tasks:
                 await self._emit_agent_message(run_id, "tech-lead", "Tech Lead",
                     f"Planning failed: {leader_result.error or 'No tasks generated'}")
@@ -905,6 +1033,10 @@ class RunManager:
                     ),
                     llm_config=llm_configs.get("leader"),
                 )
+
+                # Persist LLM metrics from the Leader replan call
+                await self._persist_agent_metrics(
+                    run_id, "leader", replan_result.cost, replan_result.total_tokens)
 
                 if replan_result.status == "error" or not replan_result.tasks:
                     await self._emit_agent_message(run_id, "tech-lead", "Tech Lead",

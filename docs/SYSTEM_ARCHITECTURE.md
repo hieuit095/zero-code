@@ -1,7 +1,7 @@
 # System Architecture — Flight Manual
 
 > **Audience:** Future maintainers, on-call engineers, security reviewers.
-> **Last Updated:** 2026-03-17 — Post Mentorship Loop and LLM Economic Routing implementation.
+> **Last Updated:** 2026-03-18 — OpenSandbox migration (replacing OpenHands SDK pseudo-sandbox with true Docker containerization).
 
 ---
 
@@ -90,16 +90,16 @@ Nanobot instances (Leader, Dev, QA) drive cognition and workflow. They communica
 
 **LLM Economic Routing:** Model selection is configured per-run via the `LLMRoutingModel` database table and the Settings UI. API keys are Fernet-encrypted in `APIKeyModel`. The Leader's expensive model is invoked only twice per task at most: once for planning and once for mentorship (if needed).
 
-### The Muscle: OpenHands SDK
-The MCP facade translates Nanobot tool calls into physical OpenHands SDK Actions:
+### The Muscle: OpenSandbox (Alibaba)
+The MCP facade translates Nanobot tool calls into physical OpenSandbox container operations:
 
-| MCP Endpoint | SDK Action | SDK Observation |
-|-------------|-----------|-----------------|
-| `POST /internal/mcp/read_file` | `FileReadAction(path=...)` | `FileReadObservation` |
-| `POST /internal/mcp/write_file` | `FileWriteAction(path=..., content=...)` | `FileWriteObservation` |
-| `POST /internal/mcp/exec` | `CmdRunAction(command=..., cwd=...)` | `CmdOutputObservation` |
+| MCP Endpoint | OpenSandbox API | Description |
+|-------------|----------------|-------------|
+| `POST /internal/mcp/read_file` | `sandbox.files.read_file(path)` | Read file from Docker container |
+| `POST /internal/mcp/write_file` | `sandbox.files.write_files([WriteEntry(...)])` | Write file inside Docker container |
+| `POST /internal/mcp/exec` | `sandbox.commands.run(command)` | Execute shell command inside Docker container |
 
-**Critical note:** OpenHands SDK merges `stderr` into `stdout` in `CmdOutputObservation.content`. The QA agent reads errors from `stdout`, not the empty `stderr` field.
+**Critical architectural change (2026-03-18):** The previous OpenHands `TerminalExecutor`-based pseudo-sandbox (which relied on host-side `_jail_path()` string jailing) has been completely replaced by Alibaba OpenSandbox. Each workspace now runs inside a **real Docker container** provisioned by `Sandbox.create()`. All file and command operations execute inside the container — there are zero host-side `subprocess`, `open()`, or `os.scandir()` calls.
 
 There is **no subprocess fallback**. If the SDK is unavailable, `SandboxUnavailableError` is raised.
 
@@ -107,11 +107,11 @@ There is **no subprocess fallback**. If the SDK is unavailable, `SandboxUnavaila
 
 ## 4. Security Protocols
 
-### 4.1 Symlink-Safe Path Jail (`_jail_path`)
-- All file operations and the `cwd` parameter pass through `_jail_path()`.
-- Uses `os.path.realpath()` to **eagerly resolve symlinks** before checking containment.
-- Both the candidate path AND `WORKSPACE_ROOT` are resolved through `realpath`, then compared.
-- Blocks: null bytes, `..` traversal, absolute paths outside `/workspace`, symlink escapes.
+### 4.1 Container-Based Isolation (OpenSandbox)
+- Each workspace runs inside an isolated Docker container managed by Alibaba OpenSandbox.
+- The container boundary IS the jail — there is no host-side path resolution needed.
+- The previous `_jail_path()` function (which used `os.path.realpath()` to check symlink escapes) has been **removed** since the container boundary provides absolute isolation.
+- Agents cannot access, modify, or escape to the host filesystem under any circumstances.
 
 ### 4.2 JWT MCP Facade (12-Hour Lifecycle)
 - Every MCP endpoint requires a JWT Bearer token.

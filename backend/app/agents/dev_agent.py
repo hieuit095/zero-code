@@ -110,6 +110,33 @@ class DevAgentResult:
     summary: str = ""
     raw_output: str = ""
     error: str | None = None
+    cost: float = 0.0
+    total_tokens: int = 0
+
+
+# ─── LLM Metrics Extraction ───────────────────────────────────────────────────
+
+
+def _extract_llm_metrics(llm_handle: Any) -> tuple[float, int]:
+    """Safely extract accumulated cost and total tokens from an SDK LLM.
+
+    Returns:
+        (cost, total_tokens) — defaults to (0.0, 0) on any failure.
+    """
+    cost = 0.0
+    total_tokens = 0
+    if llm_handle is None:
+        return cost, total_tokens
+    metrics = getattr(llm_handle, "metrics", None)
+    if metrics is None:
+        return cost, total_tokens
+    cost = float(getattr(metrics, "accumulated_cost", 0.0) or 0.0)
+    token_usage = getattr(metrics, "accumulated_token_usage", None)
+    if token_usage is not None:
+        prompt = int(getattr(token_usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(token_usage, "completion_tokens", 0) or 0)
+        total_tokens = prompt + completion
+    return cost, total_tokens
 
 
 class DevAgent:
@@ -237,7 +264,11 @@ class DevAgent:
                         break
 
             # Attempt to parse structured JSON from the output
-            return self._parse_result(raw_output, llm)
+            result = self._parse_result(raw_output, llm)
+
+            # ── Extract LLM metrics ───────────────────────────────────
+            result.cost, result.total_tokens = _extract_llm_metrics(self._last_llm)
+            return result
 
         except Exception as e:
             logger.exception("DevAgent.run() failed for run %s", run_id)

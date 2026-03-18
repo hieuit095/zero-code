@@ -72,9 +72,12 @@ This file is derived from `plan.md` and `deployment-plan.md`. Keep those documen
 
 **Execution Sandbox**
 
-- Use **OpenHands SDK** as the execution substrate.
-- Expose OpenHands to agents **only through a run-scoped HTTP MCP service**.
-- Treat the sandbox MCP facade as the native tool surface for file operations, patching, command execution, tests, logs, and artifacts.
+- Use **Alibaba OpenSandbox** as the execution substrate (replacing the previous OpenHands SDK pseudo-sandbox).
+- Each workspace runs inside a **real Docker container** provisioned by `Sandbox.create()`, providing true filesystem and process isolation.
+- Expose sandbox capabilities to agents **only through a run-scoped HTTP MCP service**.
+- Treat the sandbox MCP facade as the native tool surface for file operations, command execution, tests, logs, and artifacts.
+- All file and command operations route through the container's native APIs (`sandbox.files.read_file()`, `sandbox.files.write_files()`, `sandbox.commands.run()`) — there are **zero** host-side `subprocess`, `open()`, or `os.scandir()` calls.
+- Host-side path jailing (`_jail_path`) has been **removed** — the Docker container boundary IS the jail.
 
 **LLM Economic Routing**
 
@@ -92,7 +95,7 @@ The system dynamically routes tasks to specialized models based on cost and capa
 
 **Canonical control path**
 
-`React UI -> FastAPI Orchestrator -> Run State Machine -> Nanobot Role Agents -> Sandbox MCP Facade -> OpenHands Workspace`
+`React UI -> FastAPI Orchestrator -> Run State Machine -> Nanobot Role Agents -> Sandbox MCP Facade -> OpenSandbox Docker Container`
 
 **Boundary ownership**
 
@@ -100,12 +103,12 @@ The system dynamically routes tasks to specialized models based on cost and capa
 - **FastAPI** owns run orchestration and event contracts.
 - **Nanobot** owns agent cognition and tool invocation.
 - **Sandbox MCP** owns the safe tool interface exposed to agents.
-- **OpenHands** owns isolated filesystem and process execution.
+- **OpenSandbox** owns isolated containerized filesystem and process execution.
 
 ## 3. Strict Anti-Patterns & Hard Rules (CRITICAL)
 
-- **Rule 1:** The React frontend **MUST NEVER** interact directly with OpenHands or the MCP layer.
-- **Rule 2:** Nanobot agents **MUST NEVER** use local host shell or local filesystem tools in production. They must use only the sandbox tools exposed through the OpenHands MCP facade.
+- **Rule 1:** The React frontend **MUST NEVER** interact directly with OpenSandbox containers or the MCP layer.
+- **Rule 2:** Nanobot agents **MUST NEVER** use local host shell or local filesystem tools in production. They must use only the sandbox tools exposed through the OpenSandbox MCP facade. All execution happens inside Docker containers.
 - **Rule 3:** Do **not** use Nanobot as the multi-agent workflow engine. The non-linear **Leader -> Dev -> QA -> Dev -> QA** loop must be implemented explicitly in FastAPI backend orchestration code.
 
 **Additional hard rules**
@@ -231,7 +234,7 @@ The system dynamically routes tasks to specialized models based on cost and capa
 
 - First, stabilize the frontend shell and replace simulation with typed transport.
 - Second, scaffold the FastAPI backend and websocket contracts.
-- Third, prove OpenHands workspace creation, file IO, and command execution behind a backend service.
+- Third, prove OpenSandbox workspace creation, file IO, and command execution behind a backend service.
 - Fourth, expose the sandbox through MCP and connect Nanobot to it.
 - Fifth, ship the smallest real Dev -> QA vertical slice.
 - Sixth, add the full Leader -> Dev -> QA loop with structured retries and escalation.

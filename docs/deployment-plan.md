@@ -1,5 +1,7 @@
 # Deployment Plan: From Mock Frontend to Production Multi-Agent IDE
 
+> **Last Updated:** 2026-03-18 — OpenSandbox migration complete. Phases 0-8 DELIVERED, Phase 9 (Dogfooding) IN PROGRESS.
+
 ## Goal
 
 Turn the current React mock-up into a production-ready multi-agent IDE by deploying the system in layers:
@@ -169,7 +171,12 @@ Clean the current codebase enough that it can safely become the shell of a real 
 
 You do not want to introduce OpenHands, MCP, workers, and WebSockets while the shell itself is still drifting.
 
-## Phase 1: Deploy the OpenHands Runtime Layer — ✅ DELIVERED
+## Phase 1: Deploy the OpenSandbox Runtime Layer — ✅ DELIVERED
+
+> **Post-Delivery Enhancement (2026-03-18):** The execution sandbox has been migrated from
+> OpenHands SDK `TerminalExecutor` (host-side pseudo-sandbox with path jailing) to **Alibaba
+> OpenSandbox**, which provisions real Docker containers per workspace via `Sandbox.create()`.
+> Host-side `_jail_path()` logic has been completely removed — the container boundary IS the jail.
 
 ### Objective
 
@@ -205,10 +212,11 @@ Deploy a real isolated workspace backend before building the agent loop.
 - The backend can list files, read a file, write a file, and run `pwd` or `npm run typecheck` in that workspace.
 - Workspace creation and cleanup are reliable.
 
-### OpenHands guidance this phase uses
+### OpenHands/OpenSandbox guidance this phase uses
 
-- The SDK install path includes `openhands-sdk`, `openhands-tools`, `openhands-workspace`, and `openhands-agent-server`.
-- OpenHands remote agent servers are explicitly designed for isolated production deployments and support REST + WebSocket streaming.
+- The original SDK install path included `openhands-sdk`, `openhands-tools`, `openhands-workspace`, and `openhands-agent-server`.
+- **As of 2026-03-18**, these have been replaced by `opensandbox` and `opensandbox-server`.
+- OpenSandbox containers achieve the same isolation goals as OpenHands remote agent servers but with simpler lifecycle management and true Docker containerization.
 
 ## Phase 2: Deploy the Sandbox MCP Facade — ✅ DELIVERED
 

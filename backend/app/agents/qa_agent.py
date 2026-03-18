@@ -309,6 +309,8 @@ class QaAgentResult:
     commands: list[QaCheckResult] = field(default_factory=list)
     # Debug
     raw_output: str = ""
+    cost: float = 0.0
+    total_tokens: int = 0
 
     def to_report_dict(self) -> dict[str, Any]:
         """Serialize to the qa:report event data shape (with scores)."""
@@ -375,6 +377,31 @@ def _build_qa_skills(changed_files: list[str]) -> list[Any]:
 
 
 # ─── Agent ────────────────────────────────────────────────────────────────────
+
+
+# ─── LLM Metrics Extraction ───────────────────────────────────────────────────
+
+
+def _extract_llm_metrics(llm_handle: Any) -> tuple[float, int]:
+    """Safely extract accumulated cost and total tokens from an SDK LLM.
+
+    Returns:
+        (cost, total_tokens) — defaults to (0.0, 0) on any failure.
+    """
+    cost = 0.0
+    total_tokens = 0
+    if llm_handle is None:
+        return cost, total_tokens
+    metrics = getattr(llm_handle, "metrics", None)
+    if metrics is None:
+        return cost, total_tokens
+    cost = float(getattr(metrics, "accumulated_cost", 0.0) or 0.0)
+    token_usage = getattr(metrics, "accumulated_token_usage", None)
+    if token_usage is not None:
+        prompt = int(getattr(token_usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(token_usage, "completion_tokens", 0) or 0)
+        total_tokens = prompt + completion
+    return cost, total_tokens
 
 
 class QaAgent:
@@ -514,7 +541,11 @@ class QaAgent:
                         raw_output = content
                         break
 
-            return self._parse_result(raw_output, task_id, attempt)
+            result = self._parse_result(raw_output, task_id, attempt)
+
+            # ── Extract LLM metrics ───────────────────────────────────
+            result.cost, result.total_tokens = _extract_llm_metrics(self._last_llm)
+            return result
 
         except Exception as e:
             logger.exception("QaAgent.run() failed for run %s", run_id)

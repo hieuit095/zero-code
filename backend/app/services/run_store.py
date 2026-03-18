@@ -67,6 +67,28 @@ class RunStore:
         )
         await session.commit()
 
+    @staticmethod
+    async def update_run_metrics(
+        session: AsyncSession,
+        run_id: str,
+        *,
+        additional_cost: float = 0.0,
+        additional_tokens: int = 0,
+    ) -> None:
+        """Atomically increment cost and token counters on the run row."""
+        if additional_cost == 0.0 and additional_tokens == 0:
+            return
+        await session.execute(
+            update(RunModel)
+            .where(RunModel.id == run_id)
+            .values(
+                total_cost=RunModel.total_cost + additional_cost,
+                total_tokens=RunModel.total_tokens + additional_tokens,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
     # ─── Tasks ────────────────────────────────────────────────────────────
 
     @staticmethod

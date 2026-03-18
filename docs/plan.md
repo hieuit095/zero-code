@@ -809,7 +809,7 @@ backend/
 - Do not let the frontend call OpenHands directly.
 - Do not let Nanobot tools operate on the host machine in production mode.
 
-## Phase 3: The Brain
+## Phase 3: The Brain — ✅ DELIVERED
 
 ### Goal
 
@@ -840,7 +840,7 @@ Use Nanobot as the execution runtime for each agent role, but build the Leader/D
    - `leader_agent.py`
    - `dev_agent.py`
    - `qa_agent.py`
-2. Replace Nanobot's default local shell/file behavior with custom sandbox tools.
+2. Replace Nanobot's default local shell/file behavior with custom sandbox tools (now backed by OpenSandbox Docker containers).
    - `sandbox_list_files`
    - `sandbox_read_file`
    - `sandbox_apply_patch`
@@ -888,7 +888,7 @@ Leader marks task complete and schedules next task
 - Dev never executes directly on the host.
 - QA can send defects back to Dev without restarting the entire run.
 
-## Phase 4: Integration and Real-time Streaming
+## Phase 4: Integration and Real-time Streaming — ✅ DELIVERED
 
 ### Goal
 
@@ -935,27 +935,20 @@ Connect the live backend loop to the existing IDE panels and make the experience
 - user approvals for dangerous actions
 - artifact download and replay
 
-## 5. Immediate Next Steps
+## 5. Current Status — 🟢 All Phases DELIVERED
 
-1. Create the frontend transport layer now.
-   - Add `src/types/runEvents.ts`
-   - Add `src/hooks/useRunConnection.ts`
-   - Refactor `useSimulation.ts` callers to use typed socket events
-   - Move file contents into Zustand state instead of `mockEditorFiles`
+> **As of 2026-03-18:** All four implementation phases are complete. The system has entered the **Dogfooding & Staging** phase.
 
-2. Scaffold the FastAPI backend now.
-   - Create `backend/app/main.py`
-   - Add `backend/app/api/ws.py`
-   - Add `backend/app/schemas/events.py`
-   - Add `backend/app/services/openhands_client.py`
-   - Implement a stub run that streams `run:created`, `fs:tree`, and `terminal:output`
+**Key milestones achieved:**
+- Frontend transport layer (`useRunConnection.ts`) fully wired to backend events.
+- FastAPI backend with WebSocket streaming, REST snapshots, and DB-persisted run state.
+- Full Leader → Dev → QA → Mentorship orchestration loop with `TaskDelegator`.
+- LLM Economic Routing with per-agent model specialization.
+- True sandbox isolation via **Alibaba OpenSandbox** Docker containers (replacing the previous OpenHands pseudo-sandbox).
+- QA 4-Dimensional scoring (Code Quality, Requirements, Robustness, Security).
+- `LLMSummarizingCondenser` preventing context window explosion during retries.
 
-3. Implement the smallest real Leader -> Dev -> QA loop now.
-   - One task only
-   - One OpenHands workspace
-   - Dev can inspect/read/write files through sandbox tools
-   - QA can run `npm run typecheck`
-   - If QA fails, send a structured `qa:report` back to Dev and retry once
+**Next focus area:** Staging rollout, observability dashboards, and production hardening.
 
 ## References
 
