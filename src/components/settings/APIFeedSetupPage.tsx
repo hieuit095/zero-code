@@ -81,6 +81,17 @@ const PROVIDERS: Provider[] = [
     badgeColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
   },
   {
+    id: 'together',
+    name: 'Together.ai',
+    description: 'Open-source model routing with Kimi K2.5, Qwen3-Coder, GLM-5, and more.',
+    docsUrl: 'https://docs.together.ai/docs/quickstart',
+    keyPrefix: '',
+    keyPlaceholder: 'together-â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢',
+    models: ['moonshotai/Kimi-K2.5', 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8', 'zai-org/GLM-5'],
+    badge: 'Agents',
+    badgeColor: 'text-cyan-300 bg-cyan-500/10 border-cyan-500/20',
+  },
+  {
     id: 'mistral',
     name: 'Mistral',
     description: 'Mistral Large, Mixtral 8x22B — open-weight European models.',

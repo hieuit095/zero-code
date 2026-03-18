@@ -103,6 +103,8 @@ class TaskDelegator:
         dev_agent: "DevAgent",
         qa_agent: "QaAgent",
         run_id: str,
+        workspace_id: str,
+        mcp_token: str,
         task: AgentTask,
         task_idx: int,
         total_tasks: int,
@@ -115,6 +117,8 @@ class TaskDelegator:
         self._dev = dev_agent
         self._qa = qa_agent
         self._run_id = run_id
+        self._workspace_id = workspace_id
+        self._mcp_token = mcp_token
         self._task = task
         self._task_idx = task_idx
         self._total = total_tasks
@@ -234,7 +238,12 @@ class TaskDelegator:
 
         dev_result = await self._dev.run(
             run_id=self._run_id, goal=dev_input,
-            context={"attempt": attempt, "task_id": self._task.id},
+            context={
+                "attempt": attempt,
+                "task_id": self._task.id,
+                "workspace_id": self._workspace_id,
+                "mcp_token": self._mcp_token,
+            },
             llm_config=self._llm_configs.get("dev"),
         )
 
@@ -292,6 +301,10 @@ class TaskDelegator:
         qa_result = await self._qa.run(
             run_id=self._run_id, task_id=self._task.id,
             attempt=attempt, changed_files=dev_result.files_changed,
+            context={
+                "workspace_id": self._workspace_id,
+                "mcp_token": self._mcp_token,
+            },
             llm_config=self._llm_configs.get("qa"),
         )
 
@@ -440,6 +453,10 @@ class TaskDelegator:
                 f"Read /workspace/critique_report.md and the relevant source "
                 f"files, then provide step-by-step fix instructions."
             ),
+            context={
+                "workspace_id": self._workspace_id,
+                "mcp_token": self._mcp_token,
+            },
             llm_config=self._llm_configs.get("leader"),
             mentorship_mode=True,
         )
@@ -648,9 +665,21 @@ class RunManager:
     async def _emit_agent_message(
         self, run_id: str, role: str, label: str, content: str,
     ) -> None:
+        message_id = _msg_id()
+        timestamp = _now_iso()
+        await self._emit(run_id, "agent:message:start", {
+            "messageId": message_id,
+            "role": role,
+            "kind": "analysis",
+        })
+        if content:
+            await self._emit(run_id, "agent:message:delta", {
+                "messageId": message_id,
+                "delta": content,
+            })
         await self._emit(run_id, "agent:message", {
-            "id": _msg_id(), "agent": role, "agentLabel": label,
-            "content": content, "timestamp": _now_iso(),
+            "id": message_id, "agent": role, "agentLabel": label,
+            "content": content, "timestamp": timestamp,
         })
 
     async def _emit_run_state(
@@ -757,6 +786,7 @@ class RunManager:
 
             leader_result: LeaderAgentResult = await self._leader_agent.run(
                 run_id=run_id, goal=goal,
+                context={"workspace_id": workspace_id, "mcp_token": mcp_token},
                 llm_config=llm_configs.get("leader"),
             )
 
@@ -829,6 +859,8 @@ class RunManager:
                     dev_agent=self._dev_agent,
                     qa_agent=self._qa_agent,
                     run_id=run_id,
+                    workspace_id=workspace_id,
+                    mcp_token=mcp_token,
                     task=task,
                     task_idx=task_idx,
                     total_tasks=total_tasks,
@@ -903,6 +935,7 @@ class RunManager:
                         f"Please decompose this task differently or provide "
                         f"an alternative approach."
                     ),
+                    context={"workspace_id": workspace_id, "mcp_token": mcp_token},
                     llm_config=llm_configs.get("leader"),
                 )
 

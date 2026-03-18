@@ -22,6 +22,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from ..services.event_broker import get_event_broker
 
@@ -144,7 +145,13 @@ async def run_websocket(websocket: WebSocket, run_id: str) -> None:
         for task in tasks:
             if not task.done():
                 task.cancel()
-        try:
-            await websocket.close()
-        except Exception:
-            logger.warning("Error closing WebSocket for run %s", run_id, exc_info=True)
+        if (
+            websocket.application_state != WebSocketState.DISCONNECTED
+            and websocket.client_state != WebSocketState.DISCONNECTED
+        ):
+            try:
+                await websocket.close()
+            except RuntimeError:
+                logger.debug("WebSocket already closed for run %s", run_id)
+            except Exception:
+                logger.warning("Error closing WebSocket for run %s", run_id, exc_info=True)

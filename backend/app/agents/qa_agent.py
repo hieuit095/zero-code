@@ -20,9 +20,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import SecretStr
-
 from ..config import get_settings
+from .llm_utils import build_sdk_llm
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +67,9 @@ After the Dev agent has made changes, you verify them by running checks
 You are NOT a developer — you NEVER modify source code files.
 
 ## Available Tools
-1. **read_file(path)** — inspect file content (read-only)
-2. **write_file(path, content)** — write the critique report artifact
-3. **exec(command, cwd)** — run verification commands (lint, typecheck, test)
+1. **workspace_read_file(path)** — inspect file content (read-only)
+2. **workspace_write_file(path, content)** — write the critique report artifact
+3. **workspace_exec(command, cwd)** — run verification commands (lint, typecheck, test)
 
 ## Verification Steps
 1. Read the list of changed files provided in your input.
@@ -112,7 +111,7 @@ You MUST evaluate and assign a score for EACH of these dimensions:
 - 0-49: Critical vulnerabilities (arbitrary code exec, path traversal)
 
 ## Step 6: Write Critique Report
-You MUST use `write_file` to save a detailed critique to `/workspace/critique_report.md`
+You MUST use `workspace_write_file` to save a detailed critique to `/workspace/critique_report.md`
 in this EXACT format:
 
 ```
@@ -184,6 +183,7 @@ After writing the critique report, output EXACTLY this LEAN JSON
 - Run at least ONE verification command.
 - Be thorough: check syntax, types, AND tests if available.
 - The "scores" object is MANDATORY in every response.
+- Use ONLY the MCP workspace tools. Do not assume any host-local tools exist.
 """
 
 # ─── Skills for Dynamic Injection ─────────────────────────────────────────────
@@ -419,18 +419,10 @@ class QaAgent:
 
         try:
             # ── Build LLM from dynamic config ──────────────────────────
-            cfg = llm_config or {}
-            model = cfg.get("model", "gpt-4o")
-            provider = cfg.get("provider", "openai")
-            api_key = cfg.get("api_key", "")
-            base_url = cfg.get("base_url")
-
-            llm_model = f"{provider}/{model}" if "/" not in model else model
-
-            llm = LLM(
-                model=llm_model,
-                api_key=SecretStr(api_key) if api_key else None,
-                base_url=base_url,
+            llm = build_sdk_llm(
+                llm_config,
+                default_model="gpt-4o",
+                default_provider="openai",
                 usage_id=f"qa-{run_id}",
             )
             self._last_llm = llm  # Expose for metrics extraction
@@ -457,12 +449,16 @@ class QaAgent:
             # NOT via native SDK ToolDefinition bindings.
             from ..config import get_settings
             settings = get_settings()
+            ctx = context or {}
+            mcp_headers: dict[str, str] = {}
+            if ctx.get("mcp_token"):
+                mcp_headers["Authorization"] = f"Bearer {ctx['mcp_token']}"
             mcp_config = {
                 "mcpServers": {
                     "sandbox": {
                         "url": f"http://127.0.0.1:{settings.port}/internal/mcp/qa/sse",
+                        "headers": mcp_headers,
                     },
-                    "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
                 }
             }
 
@@ -475,7 +471,8 @@ class QaAgent:
 
             # ── Resolve workspace path ─────────────────────────────────
             settings = get_settings()
-            workspace_path = str(settings.workspace_path / "repo-main")
+            workspace_id = ctx.get("workspace_id", "repo-main")
+            workspace_path = str(settings.workspace_path / workspace_id)
 
             # ── Collect LLM messages via callback ──────────────────────
             llm_messages: list[Any] = []

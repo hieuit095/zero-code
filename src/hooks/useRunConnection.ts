@@ -195,6 +195,11 @@ export function useRunConnection(): UseRunConnectionReturn {
     clearReconnectTimer();
     socketRef.current?.close();
     socketRef.current = null;
+    lastWsUrlRef.current = null;
+    reconnectAttemptRef.current = 0;
+    runIdRef.current = null;
+    isHydratingRef.current = false;
+    pendingEventsRef.current = [];
 
     setState((current) => ({
       ...current,

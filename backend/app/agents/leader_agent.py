@@ -23,9 +23,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from pydantic import SecretStr
-
 from ..config import get_settings
+from .llm_utils import build_sdk_llm
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +58,10 @@ You receive a user's high-level coding goal and decompose it into a sequence
 of concrete, implementable tasks for the Dev agent. You DO NOT write code.
 
 ## Available Tools
-1. **execute_bash(command)** — run read-only commands (e.g., `find`, `ls`, `tree`, `cat`)
-2. **str_replace_editor** — inspect existing file content (view mode only)
+1. **workspace_read_file(path)** — inspect existing file content inside `/workspace`
+2. **workspace_exec(command, cwd)** — run read-only inspection commands inside the sandbox
 
-You may use these to understand the existing workspace structure before planning.
+Use these only to understand the existing workspace structure before planning.
 
 ## Planning Process
 1. Analyze the user's goal carefully.
@@ -95,6 +94,7 @@ Output EXACTLY a JSON array (no markdown fences, no extra text):
 - You MUST NOT include implementation details — only WHAT to build, not HOW.
 - You MUST NOT write any code or modify any files.
 - Output ONLY the JSON array. No preamble, no explanation, no markdown.
+- Use ONLY the MCP workspace tools. Do not assume any host-local tools exist.
 """
 
 # ─── Mentorship Mode Prompt ───────────────────────────────────────────────────
@@ -108,8 +108,8 @@ has generated a detailed critique at `/workspace/critique_report.md`. Your
 job is to rescue this task by providing targeted, authoritative guidance.
 
 ## Available Tools
-1. **execute_bash(command)** — run read-only commands (e.g., `cat`, `find`, `ls`)
-2. **str_replace_editor** — inspect existing file content (view mode only)
+1. **workspace_read_file(path)** — inspect existing file content inside `/workspace`
+2. **workspace_exec(command, cwd)** — run read-only inspection commands inside the sandbox
 
 ## Your Process
 1. Read `/workspace/critique_report.md` to understand the QA failures.
@@ -134,6 +134,7 @@ Brief root cause analysis (2–3 sentences).
 - You MUST NOT output JSON task arrays.
 - Be specific — reference exact file paths and function names.
 - Keep guidance concise (under 500 words).
+- Use ONLY the MCP workspace tools. Do not assume any host-local tools exist.
 """
 
 # ─── Data Structures ─────────────────────────────────────────────────────────
@@ -219,18 +220,10 @@ class LeaderAgent:
 
         try:
             # ── Build LLM from dynamic config ──────────────────────────
-            cfg = llm_config or {}
-            model = cfg.get("model", "gpt-4o")
-            provider = cfg.get("provider", "openai")
-            api_key = cfg.get("api_key", "")
-            base_url = cfg.get("base_url")
-
-            llm_model = f"{provider}/{model}" if "/" not in model else model
-
-            llm = LLM(
-                model=llm_model,
-                api_key=SecretStr(api_key) if api_key else None,
-                base_url=base_url,
+            llm = build_sdk_llm(
+                llm_config,
+                default_model="gpt-4o",
+                default_provider="openai",
                 usage_id=f"leader-{run_id}",
             )
             self._last_llm = llm  # Expose for metrics extraction
@@ -251,12 +244,16 @@ class LeaderAgent:
             # PHASE 2: Tools are discovered via the internal MCP server,
             # NOT via native SDK ToolDefinition bindings.
             settings = get_settings()
+            ctx = context or {}
+            mcp_headers: dict[str, str] = {}
+            if ctx.get("mcp_token"):
+                mcp_headers["Authorization"] = f"Bearer {ctx['mcp_token']}"
             mcp_config = {
                 "mcpServers": {
                     "sandbox": {
                         "url": f"http://127.0.0.1:{settings.port}/internal/mcp/tech-lead/sse",
+                        "headers": mcp_headers,
                     },
-                    "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
                 }
             }
 
@@ -269,7 +266,8 @@ class LeaderAgent:
 
             # ── Resolve workspace path ─────────────────────────────────
             settings = get_settings()
-            workspace_path = str(settings.workspace_path / "repo-main")
+            workspace_id = ctx.get("workspace_id", "repo-main")
+            workspace_path = str(settings.workspace_path / workspace_id)
 
             # ── Collect LLM messages via callback ──────────────────────
             llm_messages: list[Any] = []

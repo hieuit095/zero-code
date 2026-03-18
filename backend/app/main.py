@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.admin import router as admin_router
-from .api.mcp import router as mcp_router
+from .api.mcp import mount_mcp_facade
 from .api.runs import router as runs_router
 from .api.settings import router as settings_router
 from .api.workspaces import router as workspaces_router
@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize DB and Redis on startup, close Redis on shutdown (Rule 3)."""
+    settings = get_settings()
+    settings.validate_required_secrets()
+
     await init_db()
 
     broker = get_event_broker()
@@ -58,6 +61,7 @@ settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    allow_origin_regex=settings.cors_origin_regex or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,9 +72,9 @@ app.add_middleware(
 app.include_router(runs_router)
 app.include_router(workspaces_router)
 app.include_router(ws_router)
-app.include_router(mcp_router)
 app.include_router(admin_router)
 app.include_router(settings_router)
+mount_mcp_facade(app)
 
 
 # ─── Health ───────────────────────────────────────────────────────────────────

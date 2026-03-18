@@ -23,9 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import SecretStr
-
-from ..config import Settings, get_settings
+from ..config import get_settings
+from .llm_utils import build_sdk_llm
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +59,18 @@ writing, and patching files in the workspace. On retry, you receive a structured
 QA defect report — you must fix the exact issues listed.
 
 ## Available Tools
-You have the following tools at your disposal:
+You have the following MCP tools at your disposal:
 
-1. **execute_bash(command)** — run shell commands (install deps, run tests, etc.)
-2. **str_replace_editor** — view, create, and edit files with surgical precision
+1. **workspace_read_file(path)** — inspect existing files inside `/workspace`
+2. **workspace_write_file(path, content)** — create or fully rewrite files inside `/workspace`
+3. **workspace_exec(command, cwd)** — run shell commands inside the sandboxed workspace
 
 ## Workflow
 1. Analyze the goal or defect report.
-2. Use the editor to inspect existing code.
+2. Read the existing files you plan to change before editing them.
 3. Plan your changes (think step-by-step).
-4. Use the editor to create or update files.
-5. Use bash to verify your changes compile/run.
+4. Use `workspace_write_file` to create or update files.
+5. Use `workspace_exec` to verify your changes compile/run.
 6. Output a structured JSON summary of what you changed.
 
 ## Output Format
@@ -85,6 +85,7 @@ When you finish, output EXACTLY this JSON (no markdown fences, no extra text):
 - NEVER skip reading a file before modifying it — always inspect first.
 - On retry with a QA report, fix EVERY issue in the report before finishing.
 - Keep your changes minimal and focused on the goal.
+- Use ONLY the MCP workspace tools. Do not assume any host-local tools exist.
 """
 
 # ─── Agent Definition ─────────────────────────────────────────────────────────
@@ -153,19 +154,10 @@ class DevAgent:
 
         try:
             # ── Build LLM from dynamic config ──────────────────────────
-            cfg = llm_config or {}
-            model = cfg.get("model", "gpt-4o")
-            provider = cfg.get("provider", "openai")
-            api_key = cfg.get("api_key", "")
-            base_url = cfg.get("base_url")
-
-            # LiteLLM convention: provider/model_name
-            llm_model = f"{provider}/{model}" if "/" not in model else model
-
-            llm = LLM(
-                model=llm_model,
-                api_key=SecretStr(api_key) if api_key else None,
-                base_url=base_url,
+            llm = build_sdk_llm(
+                llm_config,
+                default_model="gpt-4o",
+                default_provider="openai",
                 usage_id=f"dev-{run_id}",
             )
             self._last_llm = llm  # Expose for metrics extraction
@@ -180,12 +172,16 @@ class DevAgent:
             # PHASE 2: Tools are discovered via the internal MCP server,
             # NOT via native SDK ToolDefinition bindings.
             settings = get_settings()
+            ctx = context or {}
+            mcp_headers: dict[str, str] = {}
+            if ctx.get("mcp_token"):
+                mcp_headers["Authorization"] = f"Bearer {ctx['mcp_token']}"
             mcp_config = {
                 "mcpServers": {
                     "sandbox": {
                         "url": f"http://127.0.0.1:{settings.port}/internal/mcp/dev/sse",
+                        "headers": mcp_headers,
                     },
-                    "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
                 }
             }
 
@@ -197,7 +193,6 @@ class DevAgent:
 
             # ── Resolve workspace path ─────────────────────────────────
             settings = get_settings()
-            ctx = context or {}
             workspace_id = ctx.get("workspace_id", "repo-main")
             workspace_path = str(settings.workspace_path / workspace_id)
 

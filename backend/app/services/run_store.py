@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import EventLogModel, RunModel, TaskModel
@@ -120,6 +120,8 @@ class RunStore:
         event_type: str,
         timestamp: str,
         data: dict[str, Any],
+        *,
+        commit: bool = True,
     ) -> EventLogModel:
         event = EventLogModel(
             run_id=run_id,
@@ -129,8 +131,31 @@ class RunStore:
             data=data,
         )
         session.add(event)
-        await session.commit()
+        if commit:
+            await session.commit()
         return event
+
+    @staticmethod
+    async def reserve_next_event_seq(
+        session: AsyncSession,
+        run_id: str,
+    ) -> int:
+        """
+        Reserve the next per-run event sequence inside the current transaction.
+
+        Lock the parent run row so concurrent publishers across processes do not
+        race on MAX(seq)+1.
+        """
+        await session.execute(
+            select(RunModel.id)
+            .where(RunModel.id == run_id)
+            .with_for_update()
+        )
+        result = await session.execute(
+            select(func.coalesce(func.max(EventLogModel.seq), 0) + 1)
+            .where(EventLogModel.run_id == run_id)
+        )
+        return int(result.scalar_one())
 
     @staticmethod
     async def get_events_for_run(

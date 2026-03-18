@@ -212,6 +212,15 @@ async def test_connection(payload: TestConnectionRequest) -> TestConnectionRespo
                 "generationConfig": {"maxOutputTokens": 1},
             },
         },
+        "together": {
+            "url": payload.base_url or "https://api.together.xyz/v1/chat/completions",
+            "headers": {"Authorization": f"Bearer {api_key}"},
+            "json": {
+                "model": "openai/gpt-oss-20b",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1,
+            },
+        },
         "groq": {
             "url": payload.base_url or "https://api.groq.com/openai/v1/chat/completions",
             "headers": {"Authorization": f"Bearer {api_key}"},

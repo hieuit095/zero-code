@@ -5,16 +5,20 @@ Tables:
   - runs: Run lifecycle (id, goal, status, workspace_id, timestamps)
   - tasks: Planned tasks per run (id, run_id, label, status, acceptance_criteria)
   - event_log: Append-only event stream per run (id, run_id, seq, type, data)
-
-NOTE: No `from __future__ import annotations` — SQLAlchemy's declarative
-mapping requires concrete type objects for Mapped[] resolution.
 """
 
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any, Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from cryptography.fernet import Fernet
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from ..config import get_settings
+
+import base64
+import hashlib
 
 
 class Base(DeclarativeBase):
@@ -39,15 +43,25 @@ class RunModel(Base):
         onupdate=lambda: datetime.now(UTC),
     )
 
-    tasks: Mapped[list["TaskModel"]] = relationship(back_populates="run", cascade="all, delete-orphan")
-    events: Mapped[list["EventLogModel"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    tasks: Mapped[list["TaskModel"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+    events: Mapped[list["EventLogModel"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
 
 
 class TaskModel(Base):
     __tablename__ = "tasks"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("runs.id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("runs.id"),
+        nullable=False,
+    )
     label: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     agent: Mapped[str] = mapped_column(String(32), default="dev")
@@ -61,9 +75,17 @@ class TaskModel(Base):
 
 class EventLogModel(Base):
     __tablename__ = "event_log"
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_event_log_run_seq"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("runs.id"), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("runs.id"),
+        nullable=False,
+        index=True,
+    )
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     type: Mapped[str] = mapped_column(String(64), nullable=False)
     timestamp: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -76,11 +98,16 @@ class AuditLogModel(Base):
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("runs.id"), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("runs.id"),
+        nullable=False,
+        index=True,
+    )
     agent_role: Mapped[str] = mapped_column(String(32), nullable=False)
-    action: Mapped[str] = mapped_column(String(32), nullable=False)  # read_file, write_file, exec
-    target: Mapped[str] = mapped_column(Text, nullable=False)         # file path or command
-    status: Mapped[str] = mapped_column(String(16), nullable=False)   # allowed, blocked
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
@@ -89,33 +116,26 @@ class AuditLogModel(Base):
     run: Mapped["RunModel"] = relationship()
 
 
-# ─── Encrypted API Key Vault ──────────────────────────────────────────────────
+@lru_cache(maxsize=1)
+def _get_fernet() -> Fernet:
+    secret = get_settings().api_key_secret
+    if not secret:
+        raise RuntimeError(
+            "API_KEY_SECRET is required to encrypt and decrypt provider keys."
+        )
 
-import os
-from cryptography.fernet import Fernet
-import base64
-import hashlib
-
-# Derive a Fernet key from an env-var secret (or generate per-process)
-_API_KEY_SECRET = os.environ.get("API_KEY_SECRET", "")
-if _API_KEY_SECRET:
-    # Derive a 32-byte key from the secret via SHA-256 → base64
-    _derived = hashlib.sha256(_API_KEY_SECRET.encode()).digest()
-    _FERNET_KEY = base64.urlsafe_b64encode(_derived)
-else:
-    _FERNET_KEY = Fernet.generate_key()
-
-_fernet = Fernet(_FERNET_KEY)
+    derived = hashlib.sha256(secret.encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(derived))
 
 
 def encrypt_key(plaintext: str) -> str:
     """Encrypt an API key for safe DB storage."""
-    return _fernet.encrypt(plaintext.encode()).decode()
+    return _get_fernet().encrypt(plaintext.encode()).decode()
 
 
 def decrypt_key(ciphertext: str) -> str:
     """Decrypt an API key from DB storage."""
-    return _fernet.decrypt(ciphertext.encode()).decode()
+    return _get_fernet().decrypt(ciphertext.encode()).decode()
 
 
 class APIKeyModel(Base):
@@ -137,11 +157,8 @@ class APIKeyModel(Base):
 
 
 class LLMRoutingModel(Base):
-    """
-    Singleton table storing which model+provider each agent role uses.
+    """Singleton table storing which model+provider each agent role uses."""
 
-    Only ONE row should exist (id=1). The API upserts this row.
-    """
     __tablename__ = "llm_routing"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
@@ -156,4 +173,3 @@ class LLMRoutingModel(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
-

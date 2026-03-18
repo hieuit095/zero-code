@@ -2,7 +2,7 @@
 Run-scoped JWT authentication for the internal MCP facade.
 
 Tokens are:
-  - Short-lived (5 min default, renewable by the orchestrator)
+  - Long-lived enough for the full mentorship loop (12 hours by default)
   - Scoped to a single run_id
   - Service-to-service only (NEVER sent to the frontend — Rule 1)
 
@@ -38,7 +38,7 @@ from ..db.models import RunModel
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 _JWT_ALGORITHM = "HS256"
-_JWT_EXPIRY_MINUTES = 5
+_JWT_EXPIRY_MINUTES = 720
 
 
 def _get_jwt_secret() -> str:
@@ -112,7 +112,15 @@ def validate_mcp_token(token: str) -> dict[str, Any]:
 
 # ─── DB-Backed Run Validation ─────────────────────────────────────────────────
 
-_ACTIVE_STATUSES = {"queued", "planning", "delegating", "developing", "verifying", "retrying"}
+_ACTIVE_STATUSES = {
+    "queued",
+    "planning",
+    "delegating",
+    "developing",
+    "verifying",
+    "retrying",
+    "leader-review",
+}
 
 
 async def _verify_run_is_active(run_id: str) -> None:

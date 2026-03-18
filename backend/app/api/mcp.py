@@ -40,7 +40,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..agents.mcp_tools import create_mcp_server
@@ -145,12 +145,16 @@ _dev_mcp = create_mcp_server(_workspace_root, role="dev")
 _qa_mcp = create_mcp_server(_workspace_root, role="qa")
 _lead_mcp = create_mcp_server(_workspace_root, role="tech-lead")
 
-# SECURITY FIX: Wrap each SSE app in JWTAuthMiddleware before mounting.
-# Every request to /internal/mcp/{role}/... must present a valid Bearer
-# token scoped to an active run, or receive an immediate 401.
-router.mount("/dev", app=JWTAuthMiddleware(_dev_mcp.sse_app()))
-router.mount("/qa", app=JWTAuthMiddleware(_qa_mcp.sse_app()))
-router.mount("/tech-lead", app=JWTAuthMiddleware(_lead_mcp.sse_app()))
+def mount_mcp_facade(app: FastAPI) -> None:
+    """
+    Mount the JWT-protected FastMCP sub-apps directly on the FastAPI app.
+
+    APIRouter.mount() is not surfaced by app.include_router(), so these mounts
+    must happen at the application level to make /internal/mcp/* reachable.
+    """
+    app.mount("/internal/mcp/dev", app=JWTAuthMiddleware(_dev_mcp.sse_app()))
+    app.mount("/internal/mcp/qa", app=JWTAuthMiddleware(_qa_mcp.sse_app()))
+    app.mount("/internal/mcp/tech-lead", app=JWTAuthMiddleware(_lead_mcp.sse_app()))
 
 logger.info(
     "MCP Facade mounted (JWT-protected): /internal/mcp/{dev,qa,tech-lead}/sse "

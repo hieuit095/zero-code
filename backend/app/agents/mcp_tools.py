@@ -123,10 +123,11 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
             f"no host-level subprocess or file I/O is used."
         ),
     )
+    workspace_id = os.path.basename(os.path.realpath(workspace_root))
 
     # ─── read_file ────────────────────────────────────────────────────
 
-    @mcp.tool()
+    @mcp.tool(name="workspace_read_file")
     def read_file(path: str) -> str:
         """
         Securely read a file from the workspace via the OpenHands SDK.
@@ -151,7 +152,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
             # Route through the SDK runtime
             client = get_openhands_client()
-            runtime = client.get_runtime("repo-main")
+            runtime = client.get_runtime(workspace_id)
             observation = runtime.terminal(
                 TerminalAction(command=f"cat {_shell_quote(safe_path)}")
             )
@@ -170,7 +171,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
     # ─── write_file ───────────────────────────────────────────────────
 
-    @mcp.tool()
+    @mcp.tool(name="workspace_write_file")
     def write_file(path: str, content: str) -> str:
         """
         Securely write a complete file to the workspace via the OpenHands SDK.
@@ -196,7 +197,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
             # Route through the SDK runtime
             client = get_openhands_client()
-            runtime = client.get_runtime("repo-main")
+            runtime = client.get_runtime(workspace_id)
             return runtime.write_file(path, content)
 
         except SandboxUnavailableError as e:
@@ -208,7 +209,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
     # ─── exec ─────────────────────────────────────────────────────────
 
-    @mcp.tool()
+    @mcp.tool(name="workspace_exec")
     def exec(command: str, cwd: str = "/workspace") -> str:
         """
         Execute a shell command inside the workspace via the OpenHands SDK.
@@ -267,7 +268,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
                 full_command = f"cd {_shell_quote(os.path.realpath(workspace_root))} && {command}"
 
             client = get_openhands_client()
-            runtime = client.get_runtime("repo-main")
+            runtime = client.get_runtime(workspace_id)
             observation = runtime.terminal(
                 TerminalAction(command=full_command)
             )
@@ -277,7 +278,7 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
             text = observation.text or ""
 
             if text.strip():
-                output_parts.append(f"STDOUT:\n{text}")
+                output_parts.append(f"OUTPUT:\n{text}")
 
             output_parts.append(f"EXIT CODE: {observation.exit_code}")
             return "\n".join(output_parts)

@@ -21,3 +21,14 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Playwright
+.playwright-cli/
+
+# Backend workspaces (runtime data)
+backend/workspaces/
