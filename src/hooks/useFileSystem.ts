@@ -24,9 +24,11 @@ export interface FileSystemReturn {
   activeFileLanguage: string;
   isAIControlMode: boolean;
   aiControlledFile: string | null;
+  isLoadingFile: boolean;
   openFile: (name: string, modified?: boolean) => void;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
+  fetchAndOpenFile: (filePath: string, workspaceId: string) => Promise<void>;
 }
 
 export function useFileSystem(): FileSystemReturn {
@@ -35,11 +37,13 @@ export function useFileSystem(): FileSystemReturn {
   const activeTabId = useFileStore((s) => s.activeTabId);
   const isAIControlMode = useFileStore((s) => s.isAIControlMode);
   const aiControlledFile = useFileStore((s) => s.aiControlledFile);
+  const isLoadingFile = useFileStore((s) => s.isLoadingFile);
   const getActiveContent = useFileStore((s) => s.getActiveContent);
   const getActiveLanguage = useFileStore((s) => s.getActiveLanguage);
   const openFile = useFileStore((s) => s.openFile);
   const closeTab = useFileStore((s) => s.closeTab);
   const setActiveTab = useFileStore((s) => s.setActiveTab);
+  const fetchAndOpenFile = useFileStore((s) => s.fetchAndOpenFile);
 
   return {
     fileTree,
@@ -49,8 +53,10 @@ export function useFileSystem(): FileSystemReturn {
     activeFileLanguage: getActiveLanguage(),
     isAIControlMode,
     aiControlledFile,
+    isLoadingFile,
     openFile,
     closeTab,
     setActiveTab,
+    fetchAndOpenFile,
   };
 }

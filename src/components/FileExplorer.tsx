@@ -46,7 +46,7 @@ interface FileRowProps {
   node: FileNode;
   depth: number;
   selectedId: string | null;
-  onSelect: (name: string) => void;
+  onSelect: (id: string, displayName: string) => void;
 }
 
 function getFileIcon(language?: string) {
@@ -75,7 +75,7 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
     if (isFolder) {
       setExpanded((p) => !p);
     } else {
-      onSelect(node.name);
+      onSelect(node.id, node.name);
     }
   };
 
@@ -123,7 +123,7 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
 }
 
 export function FileExplorer() {
-  const { fileTree, activeTabId, openFile } = useFileSystem();
+  const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
   const { sendMessage } = useRunConnection();
   const workspaceId = useSettingsStore((s) => s.workspaceId);
   const setWorkspaceId = useSettingsStore((s) => s.setWorkspaceId);
@@ -209,7 +209,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={openFile}
+              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
             />
           ))
         )}

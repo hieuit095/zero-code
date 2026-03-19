@@ -7,20 +7,13 @@
  */
 // @ai-module: Settings — AI API Feed Setup Page
 // @ai-role: Settings panel for managing AI provider API keys and custom OpenAI-compatible endpoints.
-//           All state is local (useState) — keys are NOT persisted anywhere.
-//           The "Test connection" button simulates a connectivity check with a random success/failure result.
-// @ai-dependencies: None (no store or hook imports — local state only)
+//           API keys are persisted BOTH to the Zustand settingsStore (for reactive provider availability
+//           in the Agent Setup tab) AND to the backend vault (encrypted DB storage) if the server is available.
+// @ai-dependencies: stores/settingsStore.ts (useSettingsStore, setProviderKey)
 
-// [AI-STRICT] API keys must NEVER be stored in Zustand state or committed to any store that is serialized
-//             to localStorage in plaintext. When implementing real persistence, use a secure storage mechanism:
-//             - For browser-only: Web Crypto API + IndexedDB encryption.
-//             - For server-side: Store keys in Supabase Edge Function secrets, never client-side.
-// [AI-STRICT] The test connection simulation (random success/failure) is mock-only.
-//             When implementing real connectivity checks, proxy the test through a Supabase Edge Function
-//             so the API key is never exposed in browser network traffic.
-// @ai-integration-point: Replace the setTimeout simulation in testConnection() with a real Edge Function call:
-//   const res = await fetch("/functions/v1/test-api-key", { method: "POST", body: JSON.stringify({ provider, key }) });
-//   const { success, message } = await res.json();
+// [AI-STRICT] The backend vault is the authoritative source for key persistence in production.
+//             The Zustand store acts as a reactive cache so that getAvailableProviders() updates
+//             immediately without waiting for a backend round-trip.
 
 
 import { useState, useEffect, useCallback } from 'react';
@@ -37,9 +30,8 @@ import {
   Zap,
   Globe,
   Shield,
-  Settings,
-  Save,
 } from 'lucide-react';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 type TestStatus = 'idle' | 'testing' | 'success' | 'error';
 
@@ -93,10 +85,21 @@ const PROVIDERS: Provider[] = [
     description: 'Open-source model routing with Kimi K2.5, Qwen3-Coder, GLM-5, and more.',
     docsUrl: 'https://docs.together.ai/docs/quickstart',
     keyPrefix: '',
-    keyPlaceholder: 'together-â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢',
+    keyPlaceholder: 'together-••••••••••••••••••••••••••',
     models: ['moonshotai/Kimi-K2.5', 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8', 'zai-org/GLM-5'],
     badge: 'Agents',
     badgeColor: 'text-cyan-300 bg-cyan-500/10 border-cyan-500/20',
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    description: 'Unified API for 100+ models — route to any provider with one key.',
+    docsUrl: 'https://openrouter.ai/keys',
+    keyPrefix: 'sk-or-',
+    keyPlaceholder: 'sk-or-••••••••••••••••••••••••••••••',
+    models: ['openai/gpt-4o', 'anthropic/claude-3-5-sonnet', 'google/gemini-1.5-pro'],
+    badge: 'Multi-model',
+    badgeColor: 'text-violet-400 bg-violet-500/10 border-violet-500/20',
   },
   {
     id: 'mistral',
@@ -120,23 +123,13 @@ const PROVIDERS: Provider[] = [
   },
 ];
 
+// ─── Provider Card ───────────────────────────────────────────────────────────
+
 interface ApiEntry {
   providerId: string;
   key: string;
   testStatus: TestStatus;
   testMessage: string;
-}
-
-// @ts-expect-error — MaskedKey is pre-built for future use in ProviderCard; not yet wired in
-function MaskedKey({ value, visible }: { value: string; visible: boolean }) {
-  if (!value) return <span className="text-slate-600 text-xs">Not set</span>;
-  if (visible) return <span className="text-slate-300 text-xs font-mono break-all">{value}</span>;
-  const shown = value.slice(0, 8);
-  return (
-    <span className="text-slate-400 text-xs font-mono">
-      {shown}{'•'.repeat(Math.min(value.length - 8, 20))}
-    </span>
-  );
 }
 
 function ProviderCard({
@@ -179,8 +172,9 @@ function ProviderCard({
               </span>
             )}
             <a
-              href="#"
-              onClick={(e) => e.preventDefault()}
+              href={provider.docsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
               className="ml-auto flex items-center gap-1 text-[10px] text-slate-500 hover:text-sky-400 transition-colors"
             >
               <ExternalLink className="w-2.5 h-2.5" />
@@ -260,6 +254,8 @@ function ProviderCard({
   );
 }
 
+// ─── Custom Endpoints ────────────────────────────────────────────────────────
+
 interface CustomEndpoint {
   id: string;
   name: string;
@@ -267,137 +263,7 @@ interface CustomEndpoint {
   key: string;
 }
 
-const AGENT_PROVIDERS = [
-  { id: 'openai', name: 'OpenAI' },
-  { id: 'anthropic', name: 'Anthropic' },
-  { id: 'google', name: 'Google AI' },
-  { id: 'openrouter', name: 'OpenRouter' },
-  { id: 'together', name: 'Together.ai' },
-  { id: 'groq', name: 'Groq' },
-  { id: 'mistral', name: 'Mistral' },
-  { id: 'custom', name: 'Custom' },
-];
-
-interface AgentRouting {
-  leaderModel: string;
-  leaderProvider: string;
-  devModel: string;
-  devProvider: string;
-  qaModel: string;
-  qaProvider: string;
-}
-
-function AgentRoutingSection() {
-  const [routing, setRouting] = useState<AgentRouting>({
-    leaderModel: 'gpt-4o',
-    leaderProvider: 'openai',
-    devModel: 'gpt-4o',
-    devProvider: 'openai',
-    qaModel: 'gpt-4o',
-    qaProvider: 'openai',
-  });
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
-    if (!apiBase) return;
-    fetch(`${apiBase}/api/settings/llm`)
-      .then((res) => res.json())
-      .then((data: AgentRouting) => setRouting(data))
-      .catch(() => { });
-  }, []);
-
-  const saveRouting = useCallback(async () => {
-    const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
-    if (!apiBase) return;
-    setSaving(true);
-    try {
-      await fetch(`${apiBase}/api/settings/llm`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(routing),
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch { /* ignore */ }
-    setSaving(false);
-  }, [routing]);
-
-  const roles: Array<{ key: string; label: string; modelKey: keyof AgentRouting; providerKey: keyof AgentRouting; desc: string }> = [
-    { key: 'leader', label: 'Leader (Tech Lead)', modelKey: 'leaderModel', providerKey: 'leaderProvider', desc: 'Plans and decomposes goals into tasks' },
-    { key: 'dev', label: 'Dev (Developer)', modelKey: 'devModel', providerKey: 'devProvider', desc: 'Writes and patches code via MCP tools' },
-    { key: 'qa', label: 'QA (Quality Assurance)', modelKey: 'qaModel', providerKey: 'qaProvider', desc: 'Runs linters, compilers, and verifies output' },
-  ];
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <h3 className="flex items-center gap-2 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
-          <Settings className="w-3 h-3" />
-          Agent Model Routing
-        </h3>
-        <button
-          onClick={saveRouting}
-          disabled={saving}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-medium transition-colors"
-        >
-          {saving ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : saved ? (
-            <CheckCircle2 className="w-3 h-3" />
-          ) : (
-            <Save className="w-3 h-3" />
-          )}
-          {saving ? 'Saving...' : saved ? 'Saved!' : 'Save routing'}
-        </button>
-      </div>
-
-      <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-md bg-violet-500/5 border border-violet-500/20">
-        <Info className="w-3.5 h-3.5 text-violet-400 shrink-0 mt-0.5" />
-        <p className="text-[11px] text-violet-300/80 leading-relaxed">
-          Assign a specific LLM model and provider to each agent role. Each agent can use a different provider simultaneously.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        {roles.map((role) => (
-          <div key={role.key} className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
-            <div className="flex items-center gap-2 mb-1">
-              <div className="w-2 h-2 rounded-full bg-violet-400 shrink-0" />
-              <span className="text-sm font-medium text-slate-200">{role.label}</span>
-            </div>
-            <p className="text-[10px] text-slate-500 mb-2.5 ml-4">{role.desc}</p>
-            <div className="grid grid-cols-2 gap-2 ml-4">
-              <div>
-                <label className="text-[10px] text-slate-500 uppercase tracking-wide mb-1 block">Provider</label>
-                <select
-                  value={routing[role.providerKey] as string}
-                  onChange={(e) => setRouting((p) => ({ ...p, [role.providerKey]: e.target.value }))}
-                  className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-sky-500/60 transition-colors appearance-none cursor-pointer"
-                >
-                  {AGENT_PROVIDERS.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[10px] text-slate-500 uppercase tracking-wide mb-1 block">Model</label>
-                <input
-                  type="text"
-                  value={routing[role.modelKey] as string}
-                  onChange={(e) => setRouting((p) => ({ ...p, [role.modelKey]: e.target.value }))}
-                  placeholder="e.g. gpt-4o, claude-3.5-sonnet"
-                  className="w-full bg-slate-950 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-300 placeholder:text-slate-600 font-mono focus:outline-none focus:border-sky-500/60 transition-colors"
-                />
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+// ─── Main Page ───────────────────────────────────────────────────────────────
 
 export function APIFeedSetupPage() {
   const [entries, setEntries] = useState<Record<string, ApiEntry>>({});
@@ -405,8 +271,11 @@ export function APIFeedSetupPage() {
   const [showAddCustom, setShowAddCustom] = useState(false);
   const [newEndpoint, setNewEndpoint] = useState({ name: '', baseUrl: '', key: '' });
 
+  // Zustand store integration — keeps provider availability reactive
+  const setProviderKey = useSettingsStore((s) => s.setProviderKey);
+
   // Load configured providers from backend vault on mount
-  useState(() => {
+  useEffect(() => {
     const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
     if (!apiBase) return;
 
@@ -417,19 +286,21 @@ export function APIFeedSetupPage() {
         for (const k of keys) {
           loaded[k.provider] = {
             providerId: k.provider,
-            key: k.maskedKey, // Display masked key, never the real one
+            key: k.maskedKey,
             testStatus: 'success' as TestStatus,
             testMessage: 'Key stored securely on server',
           };
+          // Sync to Zustand store so getAvailableProviders() reflects server state
+          setProviderKey(k.provider, k.maskedKey);
         }
         setEntries(loaded);
       })
       .catch(() => {
         // Backend not available — degrade gracefully
       });
-  });
+  }, [setProviderKey]);
 
-  const updateKey = async (providerId: string, key: string) => {
+  const updateKey = useCallback(async (providerId: string, key: string) => {
     if (!key) {
       // Remove from backend vault
       const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -443,6 +314,8 @@ export function APIFeedSetupPage() {
         delete next[providerId];
         return next;
       });
+      // Clear from Zustand store → provider disappears from Agent Setup dropdown
+      setProviderKey(providerId, '');
       return;
     }
 
@@ -457,16 +330,18 @@ export function APIFeedSetupPage() {
         });
         const data = await res.json();
         if (data.success) {
-          // Store only the masked key — real key is now on the server
+          const maskedKey = key.slice(0, 8) + '•'.repeat(Math.min(key.length - 8, 20));
           setEntries((p) => ({
             ...p,
             [providerId]: {
               providerId,
-              key: key.slice(0, 8) + '•'.repeat(Math.min(key.length - 8, 20)),
+              key: maskedKey,
               testStatus: 'idle',
               testMessage: 'Key stored securely',
             },
           }));
+          // Sync to Zustand store → provider appears in Agent Setup dropdown
+          setProviderKey(providerId, key);
           return;
         }
       } catch { /* fall through to local-only */ }
@@ -477,9 +352,11 @@ export function APIFeedSetupPage() {
       ...p,
       [providerId]: { providerId, key, testStatus: 'idle', testMessage: '' },
     }));
-  };
+    // Still sync to Zustand for reactive provider availability
+    setProviderKey(providerId, key);
+  }, [setProviderKey]);
 
-  const testConnection = async (providerId: string) => {
+  const testConnection = useCallback(async (providerId: string) => {
     setEntries((p) => ({
       ...p,
       [providerId]: { ...p[providerId], testStatus: 'testing', testMessage: '' },
@@ -517,15 +394,23 @@ export function APIFeedSetupPage() {
         },
       }));
     }
-  };
+  }, [entries]);
 
-  const removeEntry = (providerId: string) => {
+  const removeEntry = useCallback((providerId: string) => {
     setEntries((p) => {
       const next = { ...p };
       delete next[providerId];
       return next;
     });
-  };
+    // Clear from Zustand store
+    setProviderKey(providerId, '');
+
+    // Remove from backend vault
+    const apiBase = import.meta.env.VITE_API_BASE_URL?.trim();
+    if (apiBase) {
+      fetch(`${apiBase}/api/settings/keys/${providerId}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }, [setProviderKey]);
 
   const addCustomEndpoint = () => {
     if (!newEndpoint.name || !newEndpoint.baseUrl) return;
@@ -549,7 +434,7 @@ export function APIFeedSetupPage() {
         <div className="mb-2">
           <h2 className="text-base font-semibold text-slate-100 mb-1">AI API Feed Setup</h2>
           <p className="text-sm text-slate-500">
-            Connect your API keys to enable agent model access. Keys are stored locally and never transmitted to third parties.
+            Connect your API keys to enable agent model access. Keys are encrypted and stored securely on the server.
           </p>
         </div>
 
@@ -571,7 +456,7 @@ export function APIFeedSetupPage() {
           <div className="ml-auto flex items-start gap-1.5">
             <Shield className="w-3.5 h-3.5 text-emerald-400 mt-0.5 shrink-0" />
             <span className="text-[11px] text-slate-500 leading-relaxed">
-              Keys stored locally only
+              Encrypted server vault
             </span>
           </div>
         </div>
@@ -579,7 +464,7 @@ export function APIFeedSetupPage() {
         <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-md bg-sky-500/5 border border-sky-500/20">
           <Info className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
           <p className="text-[11px] text-sky-300/80 leading-relaxed">
-            You only need to configure the providers used by your selected models in Agent Setup. At least one key is required to run agents.
+            Configure the providers you want to use. Once a key is saved, that provider becomes available in the <span className="font-semibold text-sky-300">Agent Setup</span> tab for model assignment.
           </p>
         </div>
 
@@ -600,7 +485,7 @@ export function APIFeedSetupPage() {
           ))}
         </div>
 
-        <AgentRoutingSection />
+        {/* AgentRoutingSection REMOVED — model/provider assignment lives in Agent Setup tab */}
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">

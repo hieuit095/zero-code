@@ -7,8 +7,8 @@
  */
 // @ai-module: Settings — Agent Setup Page
 // @ai-role: Settings panel for configuring per-agent AI model selection and system prompt editing.
+//           Provider dropdown is CONDITIONALLY populated — only providers with a configured API key appear.
 //           Model and prompt state is persisted via useSettingsStore (Zustand + localStorage).
-//           Provides lock/unlock toggle to protect prompts from accidental edits, reset-to-default, and Modified badge.
 // @ai-dependencies: types/index.ts (AgentRole), stores/settingsStore.ts (useSettingsStore)
 
 
@@ -23,11 +23,12 @@ import {
   Crown,
   Code2,
   TestTube2,
+  AlertTriangle,
+  ChevronDown,
 } from 'lucide-react';
 import type { AgentRole } from '../../types';
-import { useSettingsStore } from '../../stores/settingsStore';
-
-// Removed MODELS and TIER_STYLES constants as we now support arbitrary inputs
+import { useSettingsStore, getProviderDisplayName } from '../../stores/settingsStore';
+import type { ProviderInfo } from '../../stores/settingsStore';
 
 interface AgentConfig {
   role: AgentRole;
@@ -76,48 +77,92 @@ const AGENT_CONFIGS: AgentConfig[] = [
   },
 ];
 
+// ─── Provider & Model Selector ───────────────────────────────────────────────
+
+interface ModelDropdownProps {
+  provider: string;
+  model: string;
+  availableProviders: ProviderInfo[];
+  onProviderChange: (provider: string) => void;
+  onModelChange: (model: string) => void;
+}
+
+function ModelDropdown({
+  provider,
+  model,
+  availableProviders,
+  onProviderChange,
+  onModelChange,
+}: ModelDropdownProps) {
+  const hasProviders = availableProviders.length > 0;
+
+  return (
+    <div className="space-y-2">
+      {!hasProviders && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-amber-500/5 border border-amber-500/20">
+          <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+          <span className="text-[10px] text-amber-300/80 leading-relaxed">
+            No API keys configured. Go to{' '}
+            <span className="font-semibold text-amber-300">AI API Feed</span> to add provider keys.
+          </span>
+        </div>
+      )}
+      <div className="flex gap-2">
+        {/* Provider Dropdown — only shows providers with configured API keys */}
+        <div className="relative w-1/3">
+          <select
+            value={provider}
+            onChange={(e) => onProviderChange(e.target.value)}
+            disabled={!hasProviders}
+            className={`w-full px-3 py-2 rounded-md bg-slate-900 border border-slate-700 hover:border-slate-600 focus:border-sky-500/60 focus:bg-slate-900/80 text-xs text-slate-200 focus:outline-none transition-colors appearance-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed pr-7 ${
+              !hasProviders ? 'text-slate-600' : ''
+            }`}
+          >
+            {!hasProviders && (
+              <option value="" disabled>No providers</option>
+            )}
+            {availableProviders.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+            {/* If current provider is not in available list, show it as a fallback */}
+            {provider && !availableProviders.find((p) => p.id === provider) && hasProviders && (
+              <option value={provider} disabled>
+                {getProviderDisplayName(provider)} (no key)
+              </option>
+            )}
+          </select>
+          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-500 pointer-events-none" />
+        </div>
+
+        {/* Model Input — free-text for arbitrary model IDs */}
+        <input
+          type="text"
+          value={model}
+          onChange={(e) => onModelChange(e.target.value)}
+          placeholder="Model ID (e.g. gpt-4o)"
+          className="flex-1 px-3 py-2 rounded-md bg-slate-900 border border-slate-700 hover:border-slate-600 focus:border-sky-500/60 focus:bg-slate-900/80 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none transition-colors font-mono"
+        />
+      </div>
+    </div>
+  );
+}
+
+// ─── Agent Card ──────────────────────────────────────────────────────────────
+
 interface AgentCardProps {
   config: AgentConfig;
   provider: string;
   model: string;
   prompt: string;
   locked: boolean;
+  availableProviders: ProviderInfo[];
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onPromptChange: (prompt: string) => void;
   onToggleLock: () => void;
   onResetPrompt: () => void;
-}
-
-function ModelDropdown({
-  provider,
-  model,
-  onProviderChange,
-  onModelChange,
-}: {
-  provider: string;
-  model: string;
-  onProviderChange: (v: string) => void;
-  onModelChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex gap-2">
-      <input
-        type="text"
-        value={provider}
-        onChange={(e) => onProviderChange(e.target.value)}
-        placeholder="Provider (e.g. OpenAI)"
-        className="w-1/3 px-3 py-2 rounded-md bg-slate-900 border border-slate-700 hover:border-slate-600 focus:border-sky-500/60 focus:bg-slate-900/80 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none transition-colors"
-      />
-      <input
-        type="text"
-        value={model}
-        onChange={(e) => onModelChange(e.target.value)}
-        placeholder="Model ID (e.g. gpt-4o)"
-        className="flex-1 px-3 py-2 rounded-md bg-slate-900 border border-slate-700 hover:border-slate-600 focus:border-sky-500/60 focus:bg-slate-900/80 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none transition-colors"
-      />
-    </div>
-  );
 }
 
 function AgentCard({
@@ -126,6 +171,7 @@ function AgentCard({
   model,
   prompt,
   locked,
+  availableProviders,
   onProviderChange,
   onModelChange,
   onPromptChange,
@@ -174,7 +220,13 @@ function AgentCard({
             <Bot className="w-3 h-3" />
             Provider & Model
           </label>
-          <ModelDropdown provider={provider} model={model} onProviderChange={onProviderChange} onModelChange={onModelChange} />
+          <ModelDropdown
+            provider={provider}
+            model={model}
+            availableProviders={availableProviders}
+            onProviderChange={onProviderChange}
+            onModelChange={onModelChange}
+          />
         </div>
 
         <div>
@@ -209,16 +261,26 @@ function AgentCard({
   );
 }
 
+// ─── Page ────────────────────────────────────────────────────────────────────
+
 export function AgentSetupPage() {
   const agentModels = useSettingsStore((s) => s.agentModels);
   const setAgentModel = useSettingsStore((s) => s.setAgentModel);
   const setAgentSystemPrompt = useSettingsStore((s) => s.setAgentSystemPrompt);
+  const getAvailableProviders = useSettingsStore((s) => s.getAvailableProviders);
+
+  const availableProviders = getAvailableProviders();
 
   const [locked, setLocked] = useState<Record<AgentRole, boolean>>({
     'tech-lead': true,
     dev: true,
     qa: true,
   });
+
+  const handleProviderChange = (role: AgentRole, newProvider: string) => {
+    // When provider changes, clear the model to prevent mismatched configs
+    setAgentModel(role, newProvider, '');
+  };
 
   const setModel = (role: AgentRole, provider: string, model: string) => setAgentModel(role, provider, model);
   const setPrompt = (role: AgentRole, prompt: string) => setAgentSystemPrompt(role, prompt);
@@ -235,7 +297,7 @@ export function AgentSetupPage() {
         <div className="mb-6">
           <h2 className="text-base font-semibold text-slate-100 mb-1">Agent Setup</h2>
           <p className="text-sm text-slate-500">
-            Configure the AI model and system prompt for each agent role. System prompts shape how each agent reasons and communicates.
+            Configure the AI model and system prompt for each agent role. Only providers with configured API keys are available for selection.
           </p>
         </div>
 
@@ -254,7 +316,8 @@ export function AgentSetupPage() {
             model={agentModels[cfg.role].model}
             prompt={agentModels[cfg.role].systemPrompt ?? AGENT_CONFIGS.find((c) => c.role === cfg.role)!.defaultPrompt}
             locked={locked[cfg.role]}
-            onProviderChange={(p) => setModel(cfg.role, p, agentModels[cfg.role].model)}
+            availableProviders={availableProviders}
+            onProviderChange={(p) => handleProviderChange(cfg.role, p)}
             onModelChange={(m) => setModel(cfg.role, agentModels[cfg.role].provider, m)}
             onPromptChange={(p) => setPrompt(cfg.role, p)}
             onToggleLock={() => toggleLock(cfg.role)}

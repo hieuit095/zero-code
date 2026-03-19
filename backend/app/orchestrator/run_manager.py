@@ -87,6 +87,43 @@ def _lang_for_file(path: str) -> str:
     return ext_map.get(Path(path).suffix, "plaintext")
 
 
+def _build_nested_tree(flat_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Convert a flat list of file/folder entries from openhands_client.list_tree()
+    into a nested tree structure matching the frontend FileNode[] contract.
+
+    Each entry has: {id, name, type, path}
+    Output nodes have: {id, name, type, language?, children?}
+    """
+    # Build lookup: path -> node
+    nodes: dict[str, dict[str, Any]] = {}
+    for entry in flat_entries:
+        node: dict[str, Any] = {
+            "id": entry["id"],
+            "name": entry["name"],
+            "type": entry["type"],
+        }
+        if entry["type"] == "file":
+            node["language"] = _lang_for_file(entry["name"])
+        else:
+            node["children"] = []
+        nodes[entry["path"]] = node
+
+    # Build parent-child relationships
+    roots: list[dict[str, Any]] = []
+    for entry in flat_entries:
+        entry_path = entry["path"]  # e.g. "/workspace/src/utils"
+        parent_path = "/".join(entry_path.rsplit("/", 1)[:-1])  # e.g. "/workspace/src"
+        if parent_path in nodes and parent_path != entry_path:
+            parent_node = nodes[parent_path]
+            if "children" in parent_node:
+                parent_node["children"].append(nodes[entry_path])
+        else:
+            roots.append(nodes[entry_path])
+
+    return roots
+
+
 def _build_task_path_guidance(task: AgentTask) -> str:
     """
     Add explicit path/import rules when the acceptance criteria names files.
@@ -405,6 +442,9 @@ class TaskDelegator:
             finally:
                 await self._mgr._emit(self._run_id, "dev:stop-edit",
                     {"fileName": path})
+
+        # ── fs:tree — refresh the full workspace tree after Dev writes ──
+        await self._mgr._emit_fs_tree(self._run_id, self._workspace_id)
 
         await self._mgr._emit_agent_status(self._run_id, "dev", "idle",
             task_id=self._task.id, attempt=attempt)
@@ -856,6 +896,29 @@ class RunManager:
             "content": content, "sourceAgent": source_agent, "version": 1,
         })
 
+    async def _emit_fs_tree(
+        self, run_id: str, workspace_id: str,
+    ) -> None:
+        """Fetch the workspace file tree and emit an fs:tree event."""
+        try:
+            from ..services.openhands_client import get_openhands_client
+            client = get_openhands_client()
+            flat_entries = await client.list_tree(workspace_id)
+            nested_tree = _build_nested_tree(flat_entries)
+            await self._emit(run_id, "fs:tree", {
+                "workspaceId": workspace_id,
+                "tree": nested_tree,
+            })
+            logger.info(
+                "Emitted fs:tree with %d root nodes for run %s",
+                len(nested_tree), run_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to emit fs:tree for run %s", run_id,
+                exc_info=True,
+            )
+
     async def _emit_terminal(
         self, run_id: str, agent: str, command: str, stdout: str, stderr: str,
         exit_code: int, duration_ms: int, attempt: int = 1,
@@ -932,6 +995,9 @@ class RunManager:
             await self._emit(run_id, "run:created", {
                 "status": "queued", "workspaceId": workspace_id,
             })
+
+            # ── fs:tree — send initial workspace tree to frontend ────
+            await self._emit_fs_tree(run_id, workspace_id)
 
             # ══════════════════════════════════════════════════════════
             # STATE: PLANNING

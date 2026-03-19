@@ -18,6 +18,21 @@
 import { create } from 'zustand';
 import type { FileNode, EditorTab } from '../types';
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || '';
+
+/** Map file extensions to Monaco language IDs */
+function langForPath(filePath: string): string {
+  const ext = filePath.slice(filePath.lastIndexOf('.'));
+  const map: Record<string, string> = {
+    '.py': 'python', '.ts': 'typescript', '.tsx': 'typescriptreact',
+    '.js': 'javascript', '.jsx': 'javascriptreact', '.json': 'json',
+    '.md': 'markdown', '.html': 'html', '.css': 'css',
+    '.yml': 'yaml', '.yaml': 'yaml', '.sh': 'shell',
+    '.toml': 'toml', '.rs': 'rust', '.go': 'go',
+  };
+  return map[ext] ?? 'plaintext';
+}
+
 interface FileState {
   fileTree: FileNode[];
   fileContents: Record<string, { content: string; language: string }>;
@@ -25,6 +40,7 @@ interface FileState {
   activeTabId: string;
   isAIControlMode: boolean;
   aiControlledFile: string | null;
+  isLoadingFile: boolean;
 
   getActiveContent: () => string;
   getActiveLanguage: () => string;
@@ -36,6 +52,7 @@ interface FileState {
   setFileTree: (tree: FileNode[]) => void;
   setFileFromServer: (name: string, path: string, language: string, content: string) => void;
   setAIControlMode: (active: boolean, fileName?: string) => void;
+  fetchAndOpenFile: (filePath: string, workspaceId: string) => Promise<void>;
 }
 
 export const useFileStore = create<FileState>((set, get) => ({
@@ -45,6 +62,7 @@ export const useFileStore = create<FileState>((set, get) => ({
   activeTabId: '',
   isAIControlMode: false,
   aiControlledFile: null,
+  isLoadingFile: false,
 
   getActiveContent: () => {
     const { activeTabId, fileContents } = get();
@@ -129,6 +147,53 @@ export const useFileStore = create<FileState>((set, get) => ({
           t.id === fileName ? { ...t, modified: true } : t
         ),
       }));
+    }
+  },
+
+  // Fetch file content from the backend REST API and open it in the editor
+  fetchAndOpenFile: async (filePath: string, workspaceId: string) => {
+    const state = get();
+
+    // If content is already cached, just switch to the tab
+    if (state.fileContents[filePath]) {
+      get().openFile(filePath);
+      return;
+    }
+
+    // Show loading state
+    set({ isLoadingFile: true });
+
+    try {
+      const url = `${API_BASE_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/file?path=${encodeURIComponent(filePath)}`;
+      const res = await fetch(url);
+
+      if (!res.ok) {
+        console.warn(`[fileStore] Failed to fetch file: ${res.status} ${res.statusText} (${filePath})`);
+        // Still open the tab with a fallback message so the UI doesn't silently fail
+        get().setFileFromServer(
+          filePath,
+          filePath,
+          langForPath(filePath),
+          `// Failed to load file: ${filePath}\n// Server returned ${res.status} ${res.statusText}`,
+        );
+        return;
+      }
+
+      const data = await res.json();
+      const content = data.content ?? '';
+      const language = langForPath(filePath);
+
+      get().setFileFromServer(filePath, filePath, language, content);
+    } catch (err) {
+      console.error('[fileStore] Error fetching file content:', err);
+      get().setFileFromServer(
+        filePath,
+        filePath,
+        langForPath(filePath),
+        `// Error loading file: ${filePath}\n// ${err instanceof Error ? err.message : 'Unknown error'}`,
+      );
+    } finally {
+      set({ isLoadingFile: false });
     }
   },
 }));

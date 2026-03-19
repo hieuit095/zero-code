@@ -90,6 +90,14 @@ async def run_websocket(websocket: WebSocket, run_id: str) -> None:
                             reason = msg.get("data", {}).get("reason", "user_cancelled")
                             await manager.cancel_run(run_id, reason)
 
+                        elif msg_type == "workspace:refresh":
+                            from ..orchestrator.run_manager import get_run_manager
+                            manager = get_run_manager()
+                            # Fetch workspace_id from the run's DB record
+                            snapshot = await manager.get_run_snapshot(run_id)
+                            ws_id = (snapshot or {}).get("workspace_id", "repo-main")
+                            await manager._emit_fs_tree(run_id, ws_id)
+
                         elif msg_type == "run:start":
                             from ..orchestrator.run_manager import get_run_manager
                             from ..services.event_broker import get_event_broker as _get_broker
