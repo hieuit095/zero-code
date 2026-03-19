@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Terminal + Tasks Panel
 // @ai-role: Tab-switching container for the bottom panel. Hosts TerminalPanel (xterm) and TasksPanel
 //           under a shared tab bar. Fetches logLines/isStreaming from useTerminalStream and

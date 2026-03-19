@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Agent Store
 // @ai-role: Central Zustand store for all multi-agent state: messages, task list, agent statuses,
 //           activity labels, and run lifecycle state (status, progress).

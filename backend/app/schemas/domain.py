@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Shared domain models mirroring `src/types/index.ts`.
 

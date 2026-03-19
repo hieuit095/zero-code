@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Terminal Store
 // @ai-role: Zustand store for terminal output log lines and streaming state.
 //           Feeds data to TerminalPanel (xterm.js renderer) via the useTerminalStream hook.

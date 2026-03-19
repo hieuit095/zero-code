@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Settings Store
 // @ai-role: Persistent Zustand store for agent configuration, model selection, and API keys.
 //           Uses Zustand `persist` middleware to save to localStorage.
@@ -13,18 +20,21 @@ import { persist } from 'zustand/middleware';
 import type { AgentRole } from '../types';
 
 export interface AgentModelConfig {
+  provider: string;
   model: string;
   systemPrompt: string | null;
 }
 
 interface SettingsState {
+  workspaceId: string;
   agentModels: Record<AgentRole, AgentModelConfig>;
   apiKeys: {
     openaiApiKey: string;
     openrouterApiKey: string;
   };
 
-  setAgentModel: (role: AgentRole, model: string) => void;
+  setWorkspaceId: (id: string) => void;
+  setAgentModel: (role: AgentRole, provider: string, model: string) => void;
   setAgentSystemPrompt: (role: AgentRole, prompt: string | null) => void;
   setApiKey: (provider: keyof SettingsState['apiKeys'], key: string) => void;
   getAgentConfig: () => Partial<Record<AgentRole, Record<string, unknown>>>;
@@ -32,9 +42,9 @@ interface SettingsState {
 }
 
 const defaultAgentModels: Record<AgentRole, AgentModelConfig> = {
-  'tech-lead': { model: 'gpt-4o', systemPrompt: null },
-  dev: { model: 'gpt-4o', systemPrompt: null },
-  qa: { model: 'gpt-4o-mini', systemPrompt: null },
+  'tech-lead': { provider: 'OpenAI', model: 'gpt-4o', systemPrompt: null },
+  dev: { provider: 'OpenAI', model: 'gpt-4o', systemPrompt: null },
+  qa: { provider: 'OpenAI', model: 'gpt-4o-mini', systemPrompt: null },
 };
 
 const defaultApiKeys = {
@@ -45,14 +55,17 @@ const defaultApiKeys = {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
+      workspaceId: 'repo-main',
       agentModels: { ...defaultAgentModels },
       apiKeys: { ...defaultApiKeys },
 
-      setAgentModel: (role, model) => {
+      setWorkspaceId: (id) => set({ workspaceId: id }),
+
+      setAgentModel: (role, provider, model) => {
         set((state) => ({
           agentModels: {
             ...state.agentModels,
-            [role]: { ...state.agentModels[role], model },
+            [role]: { ...state.agentModels[role], provider, model },
           },
         }));
       },
@@ -81,6 +94,7 @@ export const useSettingsStore = create<SettingsState>()(
         for (const role of Object.keys(agentModels) as AgentRole[]) {
           const entry = agentModels[role];
           config[role] = {
+            provider: entry.provider,
             model: entry.model,
             ...(entry.systemPrompt ? { systemPrompt: entry.systemPrompt } : {}),
           };
@@ -91,6 +105,7 @@ export const useSettingsStore = create<SettingsState>()(
 
       resetSettings: () =>
         set({
+          workspaceId: 'repo-main',
           agentModels: { ...defaultAgentModels },
           apiKeys: { ...defaultApiKeys },
         }),
@@ -98,6 +113,7 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'zero-code-settings',
       partialize: (state) => ({
+        workspaceId: state.workspaceId,
         agentModels: state.agentModels,
         apiKeys: state.apiKeys,
       }),

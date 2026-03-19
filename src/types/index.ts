@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Shared Type Contracts
 // @ai-role: Single source of truth for all domain types shared across stores, hooks, and components.
 //           Every type here has a "contract" annotation describing which system owns/generates that data.

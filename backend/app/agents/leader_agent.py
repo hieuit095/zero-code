@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Leader Agent — Tech Lead / Planner Nanobot (OpenHands SDK).
 
@@ -24,7 +29,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..config import get_settings
-from .llm_utils import build_sdk_llm
+from .llm_utils import build_sdk_llm, extract_last_assistant_text
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,7 @@ try:
     from openhands.sdk import (
         LLM,
         Agent,
+        AgentContext,
         Conversation,
         Event,
         LLMConvertibleEvent,
@@ -259,7 +265,7 @@ class LeaderAgent:
 
             agent = Agent(
                 llm=llm,
-                system_prompt=active_prompt,
+                agent_context=AgentContext(system_message_suffix=active_prompt),
                 condenser=condenser,
                 mcp_config=mcp_config,
             )
@@ -292,13 +298,7 @@ class LeaderAgent:
             conversation.run()
 
             # ── Extract structured result from LLM output ──────────────
-            raw_output = ""
-            if llm_messages:
-                for msg in reversed(llm_messages):
-                    content = str(msg) if msg else ""
-                    if content.strip():
-                        raw_output = content
-                        break
+            raw_output = extract_last_assistant_text(llm_messages)
 
             # ── Mentorship mode: return raw guidance, skip JSON parsing ─
             if mentorship_mode:

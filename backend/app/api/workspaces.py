@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Workspace file system REST endpoints (read-only, host-side).
 
@@ -19,7 +24,7 @@ from ..services.openhands_client import WorkspaceFS, get_workspace_fs
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
 
-@router.get("/{workspace_id}/tree")
+@router.get("/{workspace_id:path}/tree")
 async def get_workspace_tree(
     workspace_id: str,
     fs: WorkspaceFS = Depends(get_workspace_fs),
@@ -30,7 +35,7 @@ async def get_workspace_tree(
     return {"workspaceId": workspace_id, "tree": tree}
 
 
-@router.get("/{workspace_id}/file")
+@router.get("/{workspace_id:path}/file")
 async def get_workspace_file(
     workspace_id: str,
     path: str = Query(..., description="File path relative to workspace root"),

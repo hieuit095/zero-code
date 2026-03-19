@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 FastAPI application factory for the Multi-Agent IDE backend.
 
@@ -10,6 +15,7 @@ All routers are included here. No business logic lives in this file.
 from __future__ import annotations
 
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -27,6 +33,12 @@ from .services.event_broker import get_event_broker
 
 logger = logging.getLogger(__name__)
 
+for stream_name in ("stdout", "stderr"):
+    stream = getattr(sys, stream_name, None)
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="replace")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,7 +50,10 @@ async def lifespan(app: FastAPI):
 
     broker = get_event_broker()
     await broker.connect()
-    logger.info("Redis event broker connected")
+    if broker.has_redis:
+        logger.info("Redis event broker connected")
+    else:
+        logger.warning("Running without Redis; using DB-backed queue/event fallback")
 
     yield
 

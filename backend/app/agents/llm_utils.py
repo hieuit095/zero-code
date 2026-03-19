@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Helpers for constructing OpenHands SDK LLM clients from DB routing config.
 
@@ -84,9 +89,96 @@ def build_sdk_llm(
 
     llm_model = normalize_litellm_model(model, provider, base_url)
 
-    return LLM(
+    llm = LLM(
         model=llm_model,
         api_key=SecretStr(api_key) if api_key else None,
         base_url=base_url,
         usage_id=usage_id,
     )
+
+    normalized_lower = llm_model.lower()
+    if normalized_lower == "together_ai/minimaxai/minimax-m2.5":
+        logger.info(
+            "Applying Together MiniMax QA overrides: native_tool_calling=False, reasoning_effort=medium"
+        )
+        llm = llm.model_copy(update={
+            "native_tool_calling": False,
+            "reasoning_effort": "medium",
+        })
+    elif normalized_lower == "together_ai/openai/gpt-oss-120b":
+        logger.info(
+            "Applying Together gpt-oss Dev overrides: reasoning_effort=medium"
+        )
+        llm = llm.model_copy(update={
+            "reasoning_effort": "medium",
+        })
+
+    return llm
+
+
+def extract_message_text(message: Any) -> str:
+    """
+    Extract plain text from an OpenHands SDK Message-like object.
+
+    The SDK callback yields Message models whose ``str(message)`` is a repr-like
+    debug string, not the assistant's raw text. Parse the structured content
+    blocks instead so downstream JSON parsing sees the model output itself.
+    """
+    if message is None:
+        return ""
+
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            text = getattr(item, "text", None)
+            if isinstance(text, str) and text:
+                parts.append(text)
+        if parts:
+            return "".join(parts).strip()
+
+    text = getattr(message, "text", None)
+    if isinstance(text, str) and text:
+        return text.strip()
+
+    return str(message).strip()
+
+
+def extract_last_assistant_text(messages: list[Any]) -> str:
+    """
+    Return the most recent assistant-authored text block from SDK messages.
+
+    The callback stream may contain user, tool, and assistant messages. For
+    downstream JSON parsing we want the assistant's final natural-language
+    output, not the latest tool observation.
+    """
+    for message in reversed(messages):
+        role = getattr(message, "role", None)
+        role_text = ""
+        if role is not None:
+            role_text = str(getattr(role, "value", role)).strip().lower()
+
+        if role_text and role_text != "assistant":
+            continue
+
+        content = extract_message_text(message)
+        if content:
+            return content
+
+    for message in reversed(messages):
+        content = extract_message_text(message)
+        if content:
+            return content
+
+    return ""
+
+
+def summarize_message_trace(messages: list[Any], limit: int = 5) -> list[str]:
+    """Return compact role/text previews for recent SDK messages."""
+    previews: list[str] = []
+    for message in messages[-limit:]:
+        role = getattr(message, "role", None)
+        role_text = str(getattr(role, "value", role)).strip() if role is not None else "unknown"
+        text = extract_message_text(message).replace("\r", " ").replace("\n", " ").strip()
+        previews.append(f"{role_text}: {text[:160]}")
+    return previews

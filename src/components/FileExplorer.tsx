@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: File Explorer
 // @ai-role: Tree-view component rendering the virtual file system from fileStore.
 //           Clicking a file calls useFileSystem().openFile(name) which updates fileStore to open a new tab.
@@ -25,13 +32,15 @@ import {
   FileCode,
   FileText,
   FileJson,
-  GitBranch,
   Plus,
   RefreshCw,
+  Edit2,
+  FolderDot,
 } from 'lucide-react';
 import type { FileNode } from '../types';
 import { useFileSystem } from '../hooks/useFileSystem';
 import { useRunConnection } from '../hooks/useRunConnection';
+import { useSettingsStore } from '../stores/settingsStore';
 
 interface FileRowProps {
   node: FileNode;
@@ -116,6 +125,8 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
 export function FileExplorer() {
   const { fileTree, activeTabId, openFile } = useFileSystem();
   const { sendMessage } = useRunConnection();
+  const workspaceId = useSettingsStore((s) => s.workspaceId);
+  const setWorkspaceId = useSettingsStore((s) => s.setWorkspaceId);
 
   const handleRefresh = () => {
     sendMessage({
@@ -132,6 +143,18 @@ export function FileExplorer() {
       type: 'user:interrupt',
       data: { message: `Create a new file at path: ${fileName.trim()}` },
     });
+  };
+
+  const handleEditWorkspace = () => {
+    const newWorkspace = window.prompt('Enter absolute path to project folder:', workspaceId);
+    if (newWorkspace && newWorkspace.trim()) {
+      setWorkspaceId(newWorkspace.trim());
+      // Re-connect / send refresh if connected
+      sendMessage({
+        type: 'workspace:refresh',
+        data: { reason: 'workspace_changed' },
+      });
+    }
   };
 
   return (
@@ -157,9 +180,18 @@ export function FileExplorer() {
       </div>
 
       <div className="px-1 py-1 border-b border-slate-800 shrink-0">
-        <div className="flex items-center gap-1.5 px-2 py-1 text-[11px]">
-          <GitBranch className="w-3 h-3 text-emerald-400" />
-          <span className="text-emerald-400 font-medium">main</span>
+        <div className="flex items-center justify-between px-2 py-1 group">
+          <div className="flex items-center gap-1.5 text-[11px] flex-1 overflow-hidden" title={workspaceId}>
+            <FolderDot className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <span className="text-slate-300 font-medium truncate">{workspaceId}</span>
+          </div>
+          <button
+            onClick={handleEditWorkspace}
+            title="Change workspace folder"
+            className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-all shrink-0 ml-1"
+          >
+            <Edit2 className="w-3 h-3" />
+          </button>
         </div>
       </div>
 

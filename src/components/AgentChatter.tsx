@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Agent Chatter
 // @ai-role: Controlled component rendering the agent message feed and activity status bar.
 //           Receives all data as props from LeftSidebar (which reads from useAgentConnection).

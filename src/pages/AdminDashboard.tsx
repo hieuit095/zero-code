@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Admin Dashboard
 // @ai-role: System metrics dashboard fetching data from /api/admin/metrics and /api/admin/recent-runs.
 //           Polls every 10 seconds for live updates.

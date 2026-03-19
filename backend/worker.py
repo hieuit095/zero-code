@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Background worker for the Multi-Agent IDE.
 
@@ -25,6 +30,12 @@ import sys
 
 # Ensure app package is importable
 sys.path.insert(0, ".")
+
+for stream_name in ("stdout", "stderr"):
+    stream = getattr(sys, stream_name, None)
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="replace")
 
 from app.config import get_settings
 from app.db.database import init_db
@@ -138,6 +149,13 @@ async def main() -> None:
 
                 if snapshot is None:
                     logger.error("Run %s not found in DB — skipping", run_id)
+                    continue
+                if snapshot.get("status") != "queued":
+                    logger.info(
+                        "Run %s dequeued with non-queued status %s — skipping stale queue item",
+                        run_id,
+                        snapshot.get("status"),
+                    )
                     continue
 
                 # Execute the run (RunManager reads all state from DB)

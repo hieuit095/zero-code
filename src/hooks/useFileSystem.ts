@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: File System Hook
 // @ai-role: Data transport abstraction for file state consumed by UI components (FileExplorer, CodeEditorPanel).
 //           Provides a clean interface over fileStore so components are decoupled from the store implementation.

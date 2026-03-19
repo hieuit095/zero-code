@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Right Workspace
 // @ai-role: Layout shell for the main content area. Composes CodeEditorPanel (top) and TerminalTaskPanel (bottom)
 //           in a vertically resizable split. No state or data fetching — pure layout component.

@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Internal MCP Facade — FastMCP server exposing jailed workspace tools.
 
@@ -148,19 +153,12 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
         try:
             # Validate path stays within the jail BEFORE touching the SDK
-            safe_path = _jail_path(workspace_root, path)
+            _jail_path(workspace_root, path)
 
             # Route through the SDK runtime
             client = get_openhands_client()
             runtime = client.get_runtime(workspace_id)
-            observation = runtime.terminal(
-                TerminalAction(command=f"cat {_shell_quote(safe_path)}")
-            )
-
-            if observation.exit_code != 0:
-                return f"Error: File not found or unreadable: {path}"
-
-            return observation.text
+            return runtime.read_file(path)
 
         except SandboxUnavailableError as e:
             return f"Error: Sandbox unavailable — {e}"
@@ -252,26 +250,9 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
         # ── Route through the SDK TerminalExecutor ────────────────────
         try:
-            # Prepend a `cd` into the cwd so the command runs in the
-            # correct directory inside the SDK executor.
-            if cwd and cwd != "/workspace":
-                # Resolve relative cwd for the cd command
-                if cwd.startswith("/workspace/"):
-                    resolved_cwd = os.path.join(
-                        os.path.realpath(workspace_root),
-                        os.path.normpath(cwd[len("/workspace/"):]),
-                    )
-                else:
-                    resolved_cwd = os.path.realpath(workspace_root)
-                full_command = f"cd {_shell_quote(resolved_cwd)} && {command}"
-            else:
-                full_command = f"cd {_shell_quote(os.path.realpath(workspace_root))} && {command}"
-
             client = get_openhands_client()
             runtime = client.get_runtime(workspace_id)
-            observation = runtime.terminal(
-                TerminalAction(command=full_command)
-            )
+            observation = runtime.execute_terminal(command=command, cwd=cwd)
 
             # Format the observation into the same contract the agents expect
             output_parts: list[str] = []

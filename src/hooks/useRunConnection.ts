@@ -1,4 +1,11 @@
 /**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
+/**
  * WebSocket + REST bridge for the run lifecycle defined in `plan.md` section 3.
  *
  * REST request shape sent to `POST /api/runs`:

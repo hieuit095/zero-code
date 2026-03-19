@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Run lifecycle REST endpoints.
 
@@ -9,6 +14,7 @@ Run lifecycle REST endpoints.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -16,6 +22,26 @@ from pydantic import BaseModel, Field
 from ..orchestrator.run_manager import RunManager, get_run_manager
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
+
+
+def _normalize_openai_compatible_url(base_url: str | None, default_path: str) -> str:
+    """
+    Accept either an API root or a full endpoint URL for OpenAI-compatible providers.
+
+    Examples:
+      - https://api.together.xyz/v1 -> https://api.together.xyz/v1/chat/completions
+      - https://api.together.xyz/v1/chat/completions -> unchanged
+    """
+    if not base_url:
+        return default_path
+
+    parsed = urlsplit(base_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions") or path.endswith("/messages"):
+        return base_url
+
+    normalized_path = f"{path}/chat/completions" if path else "/chat/completions"
+    return urlunsplit((parsed.scheme, parsed.netloc, normalized_path, parsed.query, parsed.fragment))
 
 
 # ─── Request / Response Models ────────────────────────────────────────────────
@@ -180,7 +206,10 @@ async def test_connection(payload: TestConnectionRequest) -> TestConnectionRespo
     # Map providers to their test endpoints and request formats
     provider_configs: dict[str, dict[str, Any]] = {
         "openai": {
-            "url": payload.base_url or "https://api.openai.com/v1/chat/completions",
+            "url": _normalize_openai_compatible_url(
+                payload.base_url,
+                "https://api.openai.com/v1/chat/completions",
+            ),
             "headers": {"Authorization": f"Bearer {api_key}"},
             "json": {
                 "model": "gpt-3.5-turbo",
@@ -213,7 +242,10 @@ async def test_connection(payload: TestConnectionRequest) -> TestConnectionRespo
             },
         },
         "together": {
-            "url": payload.base_url or "https://api.together.xyz/v1/chat/completions",
+            "url": _normalize_openai_compatible_url(
+                payload.base_url,
+                "https://api.together.xyz/v1/chat/completions",
+            ),
             "headers": {"Authorization": f"Bearer {api_key}"},
             "json": {
                 "model": "openai/gpt-oss-20b",
@@ -243,7 +275,10 @@ async def test_connection(payload: TestConnectionRequest) -> TestConnectionRespo
 
     # Default: treat unknown providers as OpenAI-compatible
     config = provider_configs.get(provider, {
-        "url": payload.base_url or "https://api.openai.com/v1/chat/completions",
+        "url": _normalize_openai_compatible_url(
+            payload.base_url,
+            "https://api.openai.com/v1/chat/completions",
+        ),
         "headers": {"Authorization": f"Bearer {api_key}"},
         "json": {
             "model": "gpt-3.5-turbo",

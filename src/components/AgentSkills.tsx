@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Agent Skills
 // @ai-role: Pure local-state UI panel for browsing and toggling agent capability "skills".
 //           All state is local (useState) — no store dependency. Skills data is a local constant.

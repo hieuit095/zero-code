@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Editor Tab Bar
 // @ai-role: Pure presentational component rendering the row of open file tabs above Monaco.
 //           Receives all tab data as props from CodeEditorPanel — no direct store access.

@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Settings — AI API Feed Setup Page
 // @ai-role: Settings panel for managing AI provider API keys and custom OpenAI-compatible endpoints.
 //           All state is local (useState) — keys are NOT persisted anywhere.

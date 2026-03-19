@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Left Sidebar
 // @ai-role: Layout shell for the left panel. Composes FileExplorer (top) and AgentChatter (bottom)
 //           in a vertically resizable split. Fetches shared agent state from useAgentConnection

@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: File Store
 // @ai-role: Zustand store managing the virtual file system: file tree, open editor tabs,
 //           active tab selection, file content (reactive Zustand state), and AI control mode flag.

@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Agent Connection Hook
 // @ai-role: Data transport abstraction layer for agent state consumed by UI components.
 //           Decouples components from the Zustand store implementation so the store can be

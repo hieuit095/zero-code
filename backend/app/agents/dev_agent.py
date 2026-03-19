@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Dev Agent — Expert Developer Nanobot (OpenHands SDK).
 
@@ -19,14 +24,25 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..config import get_settings
-from .llm_utils import build_sdk_llm
+from .llm_utils import build_sdk_llm, extract_last_assistant_text
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_DIR_NAMES = {
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    "bash_events",
+    "conversations",
+    "memory",
+    "sessions",
+}
 
 # ─── SDK Import Guard ─────────────────────────────────────────────────────────
 
@@ -36,6 +52,7 @@ try:
     from openhands.sdk import (
         LLM,
         Agent,
+        AgentContext,
         Conversation,
         Event,
         LLMConvertibleEvent,
@@ -64,6 +81,7 @@ You have the following MCP tools at your disposal:
 1. **workspace_read_file(path)** — inspect existing files inside `/workspace`
 2. **workspace_write_file(path, content)** — create or fully rewrite files inside `/workspace`
 3. **workspace_exec(command, cwd)** — run shell commands inside the sandboxed workspace
+4. **finish(message)** — signal completion of the task
 
 ## Workflow
 1. Analyze the goal or defect report.
@@ -71,10 +89,11 @@ You have the following MCP tools at your disposal:
 3. Plan your changes (think step-by-step).
 4. Use `workspace_write_file` to create or update files.
 5. Use `workspace_exec` to verify your changes compile/run.
-6. Output a structured JSON summary of what you changed.
+6. As soon as the verification command succeeds, call `finish(message)` with the structured JSON summary below.
 
 ## Output Format
-When you finish, output EXACTLY this JSON (no markdown fences, no extra text):
+When you finish, use the `finish` tool and pass EXACTLY this JSON as the `message` value
+(no markdown fences, no extra text):
 {
   "status": "done",
   "filesChanged": ["path/to/file1.py", "path/to/file2.ts"],
@@ -86,6 +105,8 @@ When you finish, output EXACTLY this JSON (no markdown fences, no extra text):
 - On retry with a QA report, fix EVERY issue in the report before finishing.
 - Keep your changes minimal and focused on the goal.
 - Use ONLY the MCP workspace tools. Do not assume any host-local tools exist.
+- Do NOT keep re-reading files or re-running tests after you already have a passing verification result.
+- Once the task is complete, call `finish` immediately.
 """
 
 # ─── Agent Definition ─────────────────────────────────────────────────────────
@@ -97,7 +118,7 @@ class DevAgentConfig:
 
     system_prompt: str = DEV_SYSTEM_PROMPT
     model: str = ""  # Filled from settings at runtime
-    max_iterations: int = 20
+    max_iterations: int = 12
     name: str = "dev"
     label: str = "Dev"
 
@@ -187,6 +208,7 @@ class DevAgent:
 
             agent = Agent(
                 llm=llm,
+                agent_context=AgentContext(system_message_suffix=self.config.system_prompt),
                 condenser=condenser,
                 mcp_config=mcp_config,
             )
@@ -195,6 +217,8 @@ class DevAgent:
             settings = get_settings()
             workspace_id = ctx.get("workspace_id", "repo-main")
             workspace_path = str(settings.workspace_path / workspace_id)
+            workspace_root = Path(workspace_path)
+            before_snapshot = self._snapshot_workspace(workspace_root)
 
             # ── Collect LLM messages via callback ──────────────────────
             llm_messages: list[Any] = []
@@ -203,36 +227,59 @@ class DevAgent:
                 if isinstance(event, LLMConvertibleEvent):
                     llm_messages.append(event.to_llm_message())
 
+            attempt = ctx.get("attempt", 1)
+            task_id = ctx.get("task_id", "unknown")
+            conversation_error: Exception | None = None
+
             # ── Start Conversation lifecycle ───────────────────────────
             conversation = Conversation(
                 agent=agent,
                 callbacks=[_on_event],
                 workspace=workspace_path,
+                max_iteration_per_run=self.config.max_iterations,
+                visualizer=None,
             )
 
             # Build the user message with context
-            attempt = ctx.get("attempt", 1)
-            task_id = ctx.get("task_id", "unknown")
             user_message = (
                 f"[Run: {run_id} | Task: {task_id} | Attempt: {attempt}]\n\n"
                 f"{goal}"
             )
 
             conversation.send_message(user_message)
-            conversation.run()
+            try:
+                conversation.run()
+            except Exception as exc:
+                conversation_error = exc
+                logger.warning(
+                    "Dev agent conversation interrupted for run=%s task=%s attempt=%s; "
+                    "attempting workspace-state recovery",
+                    run_id,
+                    task_id,
+                    attempt,
+                    exc_info=True,
+                )
 
             # ── Extract structured result from LLM output ──────────────
-            raw_output = ""
-            if llm_messages:
-                # The last assistant message is our structured JSON output
-                for msg in reversed(llm_messages):
-                    content = str(msg) if msg else ""
-                    if content.strip():
-                        raw_output = content
-                        break
+            raw_output = extract_last_assistant_text(llm_messages)
+            after_snapshot = self._snapshot_workspace(workspace_root)
 
-            # Attempt to parse structured JSON from the output
-            return self._parse_result(raw_output, llm)
+            if conversation_error is not None:
+                recovered = self._recover_from_partial_execution(
+                    raw_output,
+                    before_snapshot=before_snapshot,
+                    after_snapshot=after_snapshot,
+                    error=conversation_error,
+                )
+                if recovered is not None:
+                    return recovered
+                raise conversation_error
+
+            return self._parse_result(
+                raw_output,
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+            )
 
         except Exception as e:
             logger.exception("DevAgent.run() failed for run %s", run_id)
@@ -242,7 +289,13 @@ class DevAgent:
                 error=str(e),
             )
 
-    def _parse_result(self, raw_output: str, llm: Any) -> DevAgentResult:
+    def _parse_result(
+        self,
+        raw_output: str,
+        *,
+        before_snapshot: dict[str, tuple[int, int]],
+        after_snapshot: dict[str, tuple[int, int]],
+    ) -> DevAgentResult:
         """
         Extract structured DevAgentResult from the LLM's raw output.
 
@@ -268,17 +321,167 @@ class DevAgent:
 
         try:
             parsed = json.loads(json_str)
+            files_changed = self._normalize_changed_files(parsed.get("filesChanged", []))
+            if not files_changed:
+                files_changed = self._infer_changed_files(
+                    raw_output,
+                    before_snapshot=before_snapshot,
+                    after_snapshot=after_snapshot,
+                )
             return DevAgentResult(
                 status=parsed.get("status", "done"),
-                files_changed=parsed.get("filesChanged", []),
+                files_changed=files_changed,
                 summary=parsed.get("summary", ""),
                 raw_output=raw_output,
             )
         except (json.JSONDecodeError, ValueError):
-            # Fallback: return the raw output as summary
+            inferred_files = self._infer_changed_files(
+                raw_output,
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+            )
             return DevAgentResult(
                 status="done",
-                files_changed=[],
-                summary=raw_output[:500] if raw_output else "Agent completed (no structured output).",
+                files_changed=inferred_files,
+                summary=self._summarize_unstructured_output(raw_output, inferred_files),
                 raw_output=raw_output,
             )
+
+    def _snapshot_workspace(self, workspace_root: Path) -> dict[str, tuple[int, int]]:
+        """Capture a lightweight snapshot of user-visible workspace files."""
+        snapshot: dict[str, tuple[int, int]] = {}
+        if not workspace_root.exists():
+            return snapshot
+
+        for path in workspace_root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                rel_path = path.relative_to(workspace_root)
+            except ValueError:
+                continue
+            if any(part in _RUNTIME_DIR_NAMES for part in rel_path.parts):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot[f"/workspace/{rel_path.as_posix()}"] = (
+                stat.st_mtime_ns,
+                stat.st_size,
+            )
+        return snapshot
+
+    def _normalize_changed_files(self, files_changed: list[Any]) -> list[str]:
+        normalized: list[str] = []
+        for entry in files_changed:
+            path = str(entry or "").strip()
+            if not path:
+                continue
+            path = path.replace("\\", "/")
+            if re.match(r"^[A-Za-z]:/", path):
+                continue
+            if path.startswith("./"):
+                path = path[2:]
+            if not path.startswith("/workspace/"):
+                path = f"/workspace/{path.lstrip('/')}"
+            normalized.append(path)
+
+        deduped: list[str] = []
+        for path in normalized:
+            if path not in deduped:
+                deduped.append(path)
+        return deduped
+
+    def _infer_changed_files(
+        self,
+        raw_output: str,
+        *,
+        before_snapshot: dict[str, tuple[int, int]],
+        after_snapshot: dict[str, tuple[int, int]],
+    ) -> list[str]:
+        from_output = [
+            path
+            for path in self._normalize_changed_files(
+                re.findall(r"/workspace/[A-Za-z0-9._/\\-]+", raw_output or ""),
+            )
+            if path in after_snapshot
+        ]
+        from_snapshot = sorted(
+            path
+            for path, metadata in after_snapshot.items()
+            if before_snapshot.get(path) != metadata
+        )
+        return self._normalize_changed_files(from_output + from_snapshot)
+
+    def _summarize_unstructured_output(
+        self,
+        raw_output: str,
+        inferred_files: list[str],
+    ) -> str:
+        text = (raw_output or "").strip()
+        if not text:
+            return "Agent completed (no structured output)."
+
+        noisy_markers = (
+            "assistantcommentary",
+            "assistantanalysis",
+            "workspace_read_file",
+            "workspace_write_file",
+            "workspace_exec",
+        )
+        if any(marker in text for marker in noisy_markers):
+            if inferred_files:
+                return "Agent completed with unstructured output; recovered changed files from sandbox state."
+            return "Agent completed with unstructured output."
+
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                return line[:500]
+        return text[:500]
+
+    def _recover_from_partial_execution(
+        self,
+        raw_output: str,
+        *,
+        before_snapshot: dict[str, tuple[int, int]],
+        after_snapshot: dict[str, tuple[int, int]],
+        error: Exception,
+    ) -> DevAgentResult | None:
+        """
+        Recover a usable result after an SDK interruption.
+
+        If the agent already changed real files or emitted assistant output,
+        let the orchestrator continue and rely on QA to validate the work.
+        """
+        inferred_files = self._infer_changed_files(
+            raw_output,
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+        )
+        if raw_output.strip():
+            recovered = self._parse_result(
+                raw_output,
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+            )
+            if recovered.files_changed or recovered.summary:
+                if not recovered.summary:
+                    recovered.summary = (
+                        "Recovered partial Dev result after SDK interruption."
+                    )
+                return recovered
+
+        if inferred_files:
+            return DevAgentResult(
+                status="done",
+                files_changed=inferred_files,
+                summary=(
+                    "Recovered changed files from sandbox state after SDK interruption: "
+                    f"{type(error).__name__}"
+                ),
+                raw_output=raw_output,
+            )
+
+        return None

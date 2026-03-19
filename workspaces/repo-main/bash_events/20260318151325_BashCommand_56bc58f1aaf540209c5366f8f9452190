@@ -1,0 +1,8 @@
+{
+  "command": "echo 'aGVsbG8gZnJvbSBwYXRjaGVkIHJ1bnRpbWU=' | base64 -d > '/workspace/smoke_test.txt'",
+  "cwd": "/workspace",
+  "timeout": 30,
+  "id": "56bc58f1aaf540209c5366f8f9452190",
+  "timestamp": "2026-03-18T15:13:25.241395Z",
+  "kind": "BashCommand"
+}

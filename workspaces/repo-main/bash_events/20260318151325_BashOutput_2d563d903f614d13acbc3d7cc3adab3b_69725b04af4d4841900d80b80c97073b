@@ -1,0 +1,10 @@
+{
+  "id": "69725b04af4d4841900d80b80c97073b",
+  "timestamp": "2026-03-18T15:13:25.716219Z",
+  "command_id": "2d563d903f614d13acbc3d7cc3adab3b",
+  "order": 0,
+  "exit_code": 0,
+  "stdout": "d \nd bash_events\nf bash_events/20260318151324_BashCommand_92bcf790bf434e5e98445e0e91a70d98\nf bash_events/20260318151325_BashCommand_032ee9b7a06c4498a50b8bb16fec9c3f\nf bash_events/20260318151325_BashCommand_2d563d903f614d13acbc3d7cc3adab3b\nf bash_events/20260318151325_BashCommand_3a6cf9ab9ddc4607aa17586020a1b164\nf bash_events/20260318151325_BashCommand_56bc58f1aaf540209c5366f8f9452190\nf bash_events/20260318151325_BashOutput_032ee9b7a06c4498a50b8bb16fec9c3f_69f23d2e86bb4deaa73fdc998dc27950\nf bash_events/20260318151325_BashOutput_3a6cf9ab9ddc4607aa17586020a1b164_8797a008bf994be197f2fffd7231b68e\nf bash_events/20260318151325_BashOutput_56bc58f1aaf540209c5366f8f9452190_10bf8a0086f34901b3f0d31a9ec0f2e6\nf bash_events/20260318151325_BashOutput_92bcf790bf434e5e98445e0e91a70d98_72e01dad45844fa2a5419b705ec667fd\nd conversations\nf smoke_test.txt\n",
+  "stderr": null,
+  "kind": "BashOutput"
+}

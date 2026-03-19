@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Code Editor Panel
 // @ai-role: Monaco Editor integration wrapped in the file tab system. Renders the active file content
 //           from useFileSystem() and sets readOnly mode when the Dev agent has AI control of the file.

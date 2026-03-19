@@ -1,0 +1,10 @@
+{
+  "id": "72e01dad45844fa2a5419b705ec667fd",
+  "timestamp": "2026-03-18T15:13:25.007303Z",
+  "command_id": "92bcf790bf434e5e98445e0e91a70d98",
+  "order": 0,
+  "exit_code": 0,
+  "stdout": "/workspace\ntotal 4\ndrwxrwxrwx 1 root      root      4096 Mar 18 15:13 .\ndrwxr-xr-x 1 root      root      4096 Mar 18 15:13 ..\ndrwxr-xr-x 1 openhands openhands 4096 Mar 18 15:13 bash_events\ndrwxr-xr-x 1 openhands openhands 4096 Mar 18 15:13 conversations\n",
+  "stderr": null,
+  "kind": "BashOutput"
+}

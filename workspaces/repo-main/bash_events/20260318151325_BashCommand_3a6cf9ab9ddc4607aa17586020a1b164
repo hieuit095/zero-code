@@ -1,0 +1,8 @@
+{
+  "command": "mkdir -p '/workspace'",
+  "cwd": "/workspace",
+  "timeout": 30,
+  "id": "3a6cf9ab9ddc4607aa17586020a1b164",
+  "timestamp": "2026-03-18T15:13:25.103260Z",
+  "kind": "BashCommand"
+}

@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Tasks Panel
 // @ai-role: Pure presentational component rendering the task list with status icons, agent badges,
 //           QA retry indicators, and subtask expansion. Receives tasks[] and qaRetryState as props.

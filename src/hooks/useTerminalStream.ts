@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Terminal Stream Hook
 // @ai-role: Data transport abstraction for terminal output consumed by TerminalTaskPanel and TerminalPanel.
 //           Derives isStreaming from agent working status so the streaming indicator is always accurate

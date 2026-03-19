@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Terminal Panel (xterm.js)
 // @ai-role: Pure dumb rendering component for the xterm.js terminal emulator.
 //           Receives logLines[] as props and renders ANSI-formatted output incrementally.

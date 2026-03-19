@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Settings Modal Shell
 // @ai-role: Modal container for the Settings section. Manages tab navigation between Agent Setup and AI API Feed.
 //           Renders the correct page component based on activeTab prop. Handles Escape-to-close and backdrop click.

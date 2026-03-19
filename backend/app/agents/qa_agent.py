@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 QA Agent — Strict Verification Nanobot (OpenHands SDK).
 
@@ -15,13 +20,21 @@ The QA agent uses AgentContext + Skills for dynamic capability injection.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..config import get_settings
-from .llm_utils import build_sdk_llm
+from .llm_utils import (
+    build_sdk_llm,
+    extract_message_text,
+    extract_last_assistant_text,
+    summarize_message_trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +51,7 @@ try:
         Event,
         LLMConvertibleEvent,
     )
+    from openhands.sdk.llm import Message, TextContent
     from openhands.sdk.context import Skill
     from openhands.sdk.context.condenser import LLMSummarizingCondenser
     _SDK_AVAILABLE = True
@@ -417,6 +431,10 @@ class QaAgent:
                 retryable=False,
             )
 
+        ctx = context or {}
+        workspace_id = str(ctx.get("workspace_id", "repo-main"))
+        llm: Any | None = None
+
         try:
             # ── Build LLM from dynamic config ──────────────────────────
             llm = build_sdk_llm(
@@ -438,6 +456,7 @@ class QaAgent:
             agent_context = AgentContext(
                 skills=qa_skills,
                 system_message_suffix=(
+                    f"{self.config.system_prompt}\n\n"
                     "Remember: You MUST include the 'scores' object with all 4 "
                     "dimensions (code_quality, requirements, robustness, security) "
                     "in EVERY response. Scores are integers 0-100."
@@ -449,7 +468,6 @@ class QaAgent:
             # NOT via native SDK ToolDefinition bindings.
             from ..config import get_settings
             settings = get_settings()
-            ctx = context or {}
             mcp_headers: dict[str, str] = {}
             if ctx.get("mcp_token"):
                 mcp_headers["Authorization"] = f"Bearer {ctx['mcp_token']}"
@@ -471,8 +489,22 @@ class QaAgent:
 
             # ── Resolve workspace path ─────────────────────────────────
             settings = get_settings()
-            workspace_id = ctx.get("workspace_id", "repo-main")
             workspace_path = str(settings.workspace_path / workspace_id)
+            critique_path = Path(workspace_path) / "critique_report.md"
+            force_assisted_review = self._should_force_assisted_review(
+                changed_files=changed_files,
+                context=ctx,
+            )
+
+            # Prevent stale verdict recovery from a previous task/attempt.
+            try:
+                critique_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Unable to clear stale critique report at %s before QA run",
+                    critique_path,
+                    exc_info=True,
+                )
 
             # ── Collect LLM messages via callback ──────────────────────
             llm_messages: list[Any] = []
@@ -486,6 +518,8 @@ class QaAgent:
                 agent=agent,
                 callbacks=[_on_event],
                 workspace=workspace_path,
+                max_iteration_per_run=self.config.max_iterations,
+                visualizer=None,
             )
 
             files_list = "\n".join(f"  - {f}" for f in changed_files)
@@ -500,20 +534,161 @@ class QaAgent:
             )
 
             conversation.send_message(user_message)
-            conversation.run()
+            try:
+                conversation.run()
+            except Exception as exc:
+                logger.warning(
+                    "QA agent conversation failed for run=%s task=%s attempt=%s; "
+                    "attempting deterministic assisted review",
+                    run_id,
+                    task_id,
+                    attempt,
+                    exc_info=True,
+                )
+                assisted = await self._run_assisted_review(
+                    llm=llm,
+                    workspace_id=workspace_id,
+                    workspace_path=workspace_path,
+                    task_id=task_id,
+                    attempt=attempt,
+                    changed_files=changed_files,
+                    context=ctx,
+                    prior_result=QaAgentResult(
+                        status="failed",
+                        task_id=task_id,
+                        attempt=attempt,
+                        scores=QaScores(0, 0, 0, 0),
+                        failing_command="qa_agent_internal",
+                        exit_code=1,
+                        summary=f"QA agent conversation failed: {exc}",
+                        errors=[QaError(
+                            kind="internal",
+                            file="",
+                            line=0,
+                            message=str(exc),
+                        )],
+                        retryable=False,
+                    ),
+                    force=True,
+                )
+                if assisted is not None:
+                    logger.warning(
+                        "Recovered QA result via assisted review after conversation failure "
+                        "for run=%s task=%s attempt=%s",
+                        run_id,
+                        task_id,
+                        attempt,
+                    )
+                    return assisted
+                raise
 
             # ── Extract structured result from LLM output ──────────────
-            raw_output = ""
-            if llm_messages:
-                for msg in reversed(llm_messages):
-                    content = str(msg) if msg else ""
-                    if content.strip():
-                        raw_output = content
-                        break
+            raw_output = extract_last_assistant_text(llm_messages)
+            if not raw_output:
+                logger.warning(
+                    "QA agent returned no assistant output for run=%s task=%s attempt=%s. "
+                    "event_types=%s recent_messages=%s",
+                    run_id,
+                    task_id,
+                    attempt,
+                    [type(event).__name__ for event in conversation.state.events[-12:]],
+                    summarize_message_trace(llm_messages),
+                )
 
-            return self._parse_result(raw_output, task_id, attempt)
+            parsed_result = self._parse_result(raw_output, task_id, attempt)
+            scores_are_zero = parsed_result.scores.to_dict() == {
+                "code_quality": 0,
+                "requirements": 0,
+                "robustness": 0,
+                "security": 0,
+            }
+            if parsed_result.failing_command == "qa_output_parse" or scores_are_zero:
+                recovered = self._recover_from_critique_report(
+                    critique_path=critique_path,
+                    task_id=task_id,
+                    attempt=attempt,
+                    raw_output=raw_output,
+                )
+                if recovered is not None:
+                    logger.warning(
+                        "Recovered QA result from critique report for run=%s task=%s attempt=%s",
+                        run_id,
+                        task_id,
+                        attempt,
+                    )
+                    return recovered
+
+            assisted = await self._run_assisted_review(
+                llm=llm,
+                workspace_id=workspace_id,
+                workspace_path=workspace_path,
+                task_id=task_id,
+                attempt=attempt,
+                changed_files=changed_files,
+                context=ctx,
+                prior_result=parsed_result,
+                force=force_assisted_review,
+            )
+            if assisted is not None:
+                logger.warning(
+                    "Recovered QA result via assisted review for run=%s task=%s attempt=%s",
+                    run_id,
+                    task_id,
+                    attempt,
+                )
+                return assisted
+
+            return parsed_result
 
         except Exception as e:
+            if llm is not None:
+                try:
+                    from ..config import get_settings
+
+                    workspace_path = str(get_settings().workspace_path / workspace_id)
+                    assisted = await self._run_assisted_review(
+                        llm=llm,
+                        workspace_id=workspace_id,
+                        workspace_path=workspace_path,
+                        task_id=task_id,
+                        attempt=attempt,
+                        changed_files=changed_files,
+                        context=ctx,
+                        prior_result=QaAgentResult(
+                            status="failed",
+                            task_id=task_id,
+                            attempt=attempt,
+                            scores=QaScores(0, 0, 0, 0),
+                            failing_command="qa_agent_internal",
+                            exit_code=1,
+                            summary=f"QA agent internal error: {e}",
+                            errors=[QaError(
+                                kind="internal",
+                                file="",
+                                line=0,
+                                message=str(e),
+                            )],
+                            retryable=False,
+                        ),
+                        force=True,
+                    )
+                    if assisted is not None:
+                        logger.warning(
+                            "Recovered QA result via assisted review after exception "
+                            "for run=%s task=%s attempt=%s",
+                            run_id,
+                            task_id,
+                            attempt,
+                        )
+                        return assisted
+                except Exception:
+                    logger.warning(
+                        "Assisted QA recovery failed after exception for run=%s task=%s attempt=%s",
+                        run_id,
+                        task_id,
+                        attempt,
+                        exc_info=True,
+                    )
             logger.exception("QaAgent.run() failed for run %s", run_id)
             return QaAgentResult(
                 status="failed",
@@ -624,3 +799,376 @@ class QaAgent:
                 retryable=False,
                 raw_output=raw_output,
             )
+
+    def _recover_from_critique_report(
+        self,
+        critique_path: Path,
+        task_id: str,
+        attempt: int,
+        raw_output: str,
+    ) -> QaAgentResult | None:
+        """Recover a structured QA result from the generated critique report."""
+        if not critique_path.exists():
+            return None
+
+        try:
+            report_text = critique_path.read_text(encoding="utf-8")
+        except OSError:
+            logger.warning("Unable to read critique report at %s", critique_path, exc_info=True)
+            return None
+
+        def _extract_score(label: str) -> int | None:
+            pattern = rf"- \*\*{re.escape(label)}\*\*: (\d+)(?:/100)?\b"
+            match = re.search(pattern, report_text, re.IGNORECASE)
+            return int(match.group(1)) if match else None
+
+        code_quality = _extract_score("Code Quality")
+        requirements = _extract_score("Requirements")
+        robustness = _extract_score("Robustness")
+        security = _extract_score("Security")
+        if None in {code_quality, requirements, robustness, security}:
+            return None
+
+        scores = QaScores(
+            code_quality=code_quality or 0,
+            requirements=requirements or 0,
+            robustness=robustness or 0,
+            security=security or 0,
+        )
+
+        summary_match = re.search(r"## Summary\s*(.*?)(?:\n## |\Z)", report_text, re.S)
+        summary = " ".join(summary_match.group(1).split()) if summary_match else ""
+
+        commands: list[QaCheckResult] = []
+        for match in re.finditer(
+            r"- `([^`]+)`\s*[→\x1a]\s*exit code\s+(-?\d+):\s*(.+)",
+            report_text,
+        ):
+            commands.append(
+                QaCheckResult(
+                    command=match.group(1).strip(),
+                    exit_code=int(match.group(2)),
+                    stdout=match.group(3).strip(),
+                )
+            )
+
+        status = "passed" if scores.passes_thresholds() else "failed"
+        failing_command = ""
+        exit_code = 0
+        for command in commands:
+            if command.exit_code != 0:
+                failing_command = command.command
+                exit_code = command.exit_code
+                break
+
+        if not failing_command and commands:
+            failing_command = commands[0].command if status == "failed" else ""
+
+        if not summary:
+            summary = "Recovered QA verdict from critique_report.md"
+
+        return QaAgentResult(
+            status=status,
+            task_id=task_id,
+            attempt=attempt,
+            summary=summary,
+            scores=scores,
+            failing_command=failing_command,
+            exit_code=exit_code,
+            commands=commands,
+            retryable=(status != "passed" and attempt < 3),
+            raw_output=raw_output or report_text,
+        )
+
+    async def _run_assisted_review(
+        self,
+        llm: Any,
+        workspace_id: str,
+        workspace_path: str,
+        task_id: str,
+        attempt: int,
+        changed_files: list[str],
+        context: dict[str, Any],
+        prior_result: QaAgentResult,
+        force: bool = False,
+    ) -> QaAgentResult | None:
+        """
+        Fallback QA path:
+        1. Run deterministic sandbox checks through the OpenHands runtime.
+        2. Ask the real QA model to score those concrete results in one shot.
+        3. Persist critique_report.md and recover a structured verdict from it.
+        """
+        scores_are_zero = prior_result.scores.to_dict() == {
+            "code_quality": 0,
+            "requirements": 0,
+            "robustness": 0,
+            "security": 0,
+        }
+        should_recover = force or (
+            prior_result.failing_command == "qa_output_parse"
+            or (prior_result.status == "failed" and scores_are_zero)
+        )
+        if not should_recover:
+            return None
+
+        critique_path = Path(workspace_path) / "critique_report.md"
+
+        from ..services.openhands_client import get_openhands_client
+
+        runtime = get_openhands_client().get_runtime(workspace_id)
+
+        expected_files = self._extract_expected_workspace_files(context)
+        file_payloads: list[tuple[str, str]] = []
+        for path in dict.fromkeys(changed_files + expected_files):
+            try:
+                content = await asyncio.to_thread(runtime.read_file, path)
+            except Exception:
+                logger.warning("Assisted QA could not read %s", path, exc_info=True)
+                continue
+            file_payloads.append((path, content[:12000]))
+
+        commands = self._select_assisted_commands(
+            workspace_path=workspace_path,
+            changed_files=changed_files,
+            context=context,
+        )
+        command_results: list[QaCheckResult] = []
+        for command in commands:
+            observation = await asyncio.to_thread(
+                runtime.execute_terminal,
+                command,
+                "/workspace",
+            )
+            command_results.append(
+                QaCheckResult(
+                    command=command,
+                    exit_code=observation.exit_code,
+                    stdout=(observation.stdout or observation.text or "")[:8000],
+                    stderr=(observation.stderr or "")[:4000],
+                    duration_ms=getattr(observation, "duration_ms", 0),
+                )
+            )
+
+        report_text = self._generate_assisted_report(
+            llm=llm,
+            task_id=task_id,
+            attempt=attempt,
+            changed_files=changed_files,
+            file_payloads=file_payloads,
+            command_results=command_results,
+            context=context,
+        )
+        if not report_text:
+            return None
+
+        write_result = await asyncio.to_thread(
+            runtime.write_file,
+            "/workspace/critique_report.md",
+            report_text,
+        )
+        if "successfully" not in write_result.lower():
+            logger.warning("Assisted QA could not write critique report: %s", write_result)
+            return None
+
+        recovered = self._recover_from_critique_report(
+            critique_path=critique_path,
+            task_id=task_id,
+            attempt=attempt,
+            raw_output=report_text,
+        )
+        if recovered is None:
+            return None
+
+        recovered.commands = command_results
+        for command in command_results:
+            if command.exit_code != 0:
+                recovered.failing_command = command.command
+                recovered.exit_code = command.exit_code
+                break
+        return recovered
+
+    def _should_force_assisted_review(
+        self,
+        *,
+        changed_files: list[str],
+        context: dict[str, Any],
+    ) -> bool:
+        """
+        Force deterministic QA checks for test-oriented tasks.
+
+        This prevents the model from hallucinating pytest targets when the task
+        explicitly requires executing tests.
+        """
+        task_label = str(context.get("task_label", "") or "").lower()
+        task_acceptance = str(context.get("task_acceptance", "") or "").lower()
+
+        if "pytest" in task_label or "pytest" in task_acceptance:
+            return True
+        if "test_" in task_label or "test_" in task_acceptance:
+            return True
+        return any(
+            path.lower().endswith(".py") and "/test" in path.lower()
+            for path in changed_files
+        )
+
+    def _select_assisted_commands(
+        self,
+        *,
+        workspace_path: str,
+        changed_files: list[str],
+        context: dict[str, Any],
+    ) -> list[str]:
+        """Choose deterministic verification commands for the assisted QA fallback."""
+        commands: list[str] = []
+        expected_files = self._extract_expected_workspace_files(context)
+        expected_rel_files = [
+            path[len("/workspace/"):]
+            for path in expected_files
+            if path.startswith("/workspace/")
+        ]
+
+        if expected_rel_files:
+            quoted_files = ", ".join(repr(path) for path in expected_rel_files)
+            commands.append(
+                'python -c "from pathlib import Path; import sys; '
+                f'files=[{quoted_files}]; '
+                "missing=[f for f in files if not Path(f).exists()]; "
+                "print('ALL_PRESENT' if not missing else 'MISSING:' + ','.join(missing)); "
+                "raise SystemExit(1 if missing else 0)\""
+            )
+
+        changed_python = [
+            path for path in changed_files
+            if path.lower().endswith(".py")
+        ]
+        if changed_python:
+            commands.append(
+                "python -m py_compile " + " ".join(changed_python)
+            )
+
+        workspace_root = Path(workspace_path)
+        pytest_targets = sorted(
+            f"/workspace/{path.name}"
+            for path in workspace_root.glob("test*.py")
+            if path.is_file()
+        )
+        task_label = str(context.get("task_label", "") or "").lower()
+        task_acceptance = str(context.get("task_acceptance", "") or "").lower()
+        requires_pytest = (
+            "pytest" in task_label
+            or "pytest" in task_acceptance
+            or "test_" in task_label
+            or "test_" in task_acceptance
+            or any(path.lower().startswith("/workspace/test") for path in expected_files)
+        )
+        if requires_pytest:
+            commands.append("python -m pytest -q")
+        elif pytest_targets:
+            commands.append("python -m pytest -q " + " ".join(pytest_targets))
+
+        return commands
+
+    def _extract_expected_workspace_files(
+        self,
+        context: dict[str, Any],
+    ) -> list[str]:
+        """Parse expected root-level filenames from the task label/acceptance."""
+        filenames: list[str] = []
+        for text in (
+            str(context.get("task_label", "") or ""),
+            str(context.get("task_acceptance", "") or ""),
+        ):
+            for candidate in re.findall(r"\b[A-Za-z0-9_.-]+\.[A-Za-z0-9]+\b", text):
+                if "/" in candidate or "\\" in candidate:
+                    continue
+                workspace_file = f"/workspace/{candidate}"
+                if workspace_file not in filenames:
+                    filenames.append(workspace_file)
+        return filenames
+
+    def _generate_assisted_report(
+        self,
+        *,
+        llm: Any,
+        task_id: str,
+        attempt: int,
+        changed_files: list[str],
+        file_payloads: list[tuple[str, str]],
+        command_results: list[QaCheckResult],
+        context: dict[str, Any],
+    ) -> str:
+        """Ask the real QA model for a markdown critique based on executed evidence."""
+        task_label = context.get("task_label", "")
+        task_acceptance = context.get("task_acceptance", "")
+        overall_goal = context.get("goal", "")
+
+        files_block = "\n\n".join(
+            f"### {path}\n```python\n{content}\n```"
+            for path, content in file_payloads
+        ) or "No changed file content could be read."
+
+        commands_block = "\n\n".join(
+            (
+                f"Command: {result.command}\n"
+                f"Exit code: {result.exit_code}\n"
+                f"STDOUT:\n{result.stdout or '(empty)'}\n"
+                f"STDERR:\n{result.stderr or '(empty)'}"
+            )
+            for result in command_results
+        ) or "No verification commands were executed."
+
+        messages = [
+            Message(
+                role="system",
+                content=[TextContent(text=(
+                    "You are QA, the strict verification system in a multi-agent coding IDE. "
+                    "You are given real changed files and real sandbox command results. "
+                    "Write ONLY a Markdown critique report in this exact structure:\n\n"
+                    "# QA Critique Report\n\n"
+                    "## Summary\n"
+                    "[Brief overall assessment]\n\n"
+                    "## Dimensional Scores\n"
+                    "- **Code Quality**: [score]/100 - [brief explanation]\n"
+                    "- **Requirements**: [score]/100 - [brief explanation]\n"
+                    "- **Robustness**: [score]/100 - [brief explanation]\n"
+                    "- **Security**: [score]/100 - [brief explanation]\n\n"
+                    "## File Evaluations\n"
+                    "### [filename]\n"
+                    "- **Issues Found**:\n"
+                    "  - [issue or 'None']\n\n"
+                    "## Command Results\n"
+                    "- `[command]` → exit code [code]: [brief result]\n\n"
+                    "## Priority Improvements\n"
+                    "1. [Most critical improvement]\n"
+                    "2. [Second priority]\n"
+                    "3. [Third priority]\n\n"
+                    "Rules:\n"
+                    "- Do not use code fences around the full report.\n"
+                    "- Base scores only on the evidence provided.\n"
+                    "- If a required filename or testing approach is wrong, penalize Requirements and Robustness.\n"
+                    "- If pytest output shows failures or no tests collected, do not pass Requirements/Robustness.\n"
+                    "- Use integer scores only."
+                ))]
+            ),
+            Message(
+                role="user",
+                content=[TextContent(text=(
+                    f"Task ID: {task_id}\n"
+                    f"Attempt: {attempt}\n"
+                    f"Task Label: {task_label}\n"
+                    f"Task Acceptance Criteria: {task_acceptance}\n"
+                    f"Overall Goal: {overall_goal}\n"
+                    f"Changed Files: {', '.join(changed_files) or '(none)'}\n\n"
+                    f"Changed File Contents:\n{files_block}\n\n"
+                    f"Actual Sandbox Command Results:\n{commands_block}"
+                ))]
+            ),
+        ]
+
+        try:
+            response = llm.completion(messages=messages, tools=[])
+        except Exception:
+            logger.warning("Assisted QA LLM completion failed", exc_info=True)
+            return ""
+
+        return extract_message_text(response.message)

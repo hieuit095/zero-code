@@ -1,0 +1,8 @@
+{
+  "command": "find '/workspace' -maxdepth 5 -not -name '.*' -not -path '*/.git' -not -path '*/.git/*' -not -path '*/.mypy_cache' -not -path '*/.mypy_cache/*' -not -path '*/.next' -not -path '*/.next/*' -not -path '*/.nuxt' -not -path '*/.nuxt/*' -not -path '*/.pytest_cache' -not -path '*/.pytest_cache/*' -not -path '*/.ruff_cache' -not -path '*/.ruff_cache/*' -not -path '*/.tox' -not -path '*/.tox/*' -not -path '*/.turbo' -not -path '*/.turbo/*' -not -path '*/.venv' -not -path '*/.venv/*' -not -path '*/__pycache__' -not -path '*/__pycache__/*' -not -path '*/build' -not -path '*/build/*' -not -path '*/dist' -not -path '*/dist/*' -not -path '*/node_modules' -not -path '*/node_modules/*' -not -path '*/venv' -not -path '*/venv/*' -printf '%y %P\\n' 2>/dev/null || true",
+  "cwd": "/workspace",
+  "timeout": 30,
+  "id": "2d563d903f614d13acbc3d7cc3adab3b",
+  "timestamp": "2026-03-18T15:13:25.690206Z",
+  "kind": "BashCommand"
+}

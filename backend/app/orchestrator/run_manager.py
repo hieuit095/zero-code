@@ -1,3 +1,8 @@
+# ==========================================
+# Author: Hieu Nguyen - Codev Team
+# Email: hieuit095@gmail.com
+# Project: ZeroCode - Autonomous Multi-Agent IDE
+# ==========================================
 """
 Run manager with SDK-native task delegation orchestrating the full
 Leader → Dev → QA pipeline.
@@ -20,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -79,6 +85,59 @@ def _lang_for_file(path: str) -> str:
         ".md": "markdown", ".html": "html", ".css": "css",
     }
     return ext_map.get(Path(path).suffix, "plaintext")
+
+
+def _build_task_path_guidance(task: AgentTask) -> str:
+    """
+    Add explicit path/import rules when the acceptance criteria names files.
+
+    This keeps the Dev agent from inventing alternate layouts such as
+    ``tests/`` or ``src.`` when a task clearly expects root-level files.
+    """
+    filenames: list[str] = []
+    for text in (task.label, str(task.acceptance_criteria or "")):
+        for candidate in re.findall(r"\b[A-Za-z0-9_.-]+\.[A-Za-z0-9]+\b", text):
+            if "/" in candidate or "\\" in candidate:
+                continue
+            if candidate not in filenames:
+                filenames.append(candidate)
+
+    if not filenames:
+        return ""
+
+    guidance_lines = [
+        "Path Rules:",
+        *[
+            f"- If you create `{name}`, create it exactly at `/workspace/{name}` unless the task explicitly names another directory."
+            for name in filenames
+        ],
+    ]
+
+    if any(name.startswith("test_") and name.endswith(".py") for name in filenames):
+        guidance_lines.extend([
+            "- For root-level Python tests, import sibling modules directly (for example `from calculator import ...`) unless an existing package structure explicitly requires another import path.",
+            "- Do not invent `src.` or `tests.` packages unless the workspace already contains that structure and the task explicitly depends on it.",
+        ])
+
+    return "\n".join(guidance_lines)
+
+
+def _scope_task_ids(
+    run_id: str,
+    tasks: list[AgentTask],
+    *,
+    start_index: int = 0,
+) -> list[AgentTask]:
+    """
+    Rewrite planner-provided task ids into run-scoped ids.
+
+    Leader prompts can emit stable ids such as ``task_calc01``.
+    The task table currently uses a globally unique primary key, so
+    repeated runs or replans must rewrite those ids before persistence.
+    """
+    for offset, task in enumerate(tasks, start=start_index + 1):
+        task.id = f"{run_id}__task_{offset:03d}__{task.id}"
+    return tasks
 
 
 # ─── TaskDelegator (SDK-native Dev→QA Delegation Unit) ────────────────────────
@@ -260,15 +319,51 @@ class TaskDelegator:
         for path in dev_result.files_changed:
             await self._mgr._emit(self._run_id, "dev:start-edit",
                 {"fileName": path, "taskId": self._task.id})
-            await self._mgr._emit_fs_update(
-                self._run_id, path, dev_result.raw_output, "dev")
-            await self._mgr._emit(self._run_id, "dev:stop-edit",
-                {"fileName": path})
+            try:
+                await self._emit_workspace_artifact(
+                    sandbox_path=path,
+                    source_agent="dev",
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "Skipping fs:update for missing dev artifact %s on run %s",
+                    path,
+                    self._run_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to emit dev artifact %s on run %s",
+                    path,
+                    self._run_id,
+                    exc_info=True,
+                )
+            finally:
+                await self._mgr._emit(self._run_id, "dev:stop-edit",
+                    {"fileName": path})
 
         await self._mgr._emit_agent_status(self._run_id, "dev", "idle",
             task_id=self._task.id, attempt=attempt)
 
         return dev_result, dev_result.files_changed
+
+    async def _emit_workspace_artifact(
+        self,
+        *,
+        sandbox_path: str,
+        source_agent: str,
+        event_path: str | None = None,
+    ) -> None:
+        """Read a sandbox file via the OpenHands runtime and emit it as fs:update."""
+        from ..services.openhands_client import get_openhands_client
+
+        runtime = get_openhands_client().get_runtime(self._workspace_id)
+        content = await asyncio.to_thread(runtime.read_file, sandbox_path)
+        await self._mgr._emit_fs_update(
+            self._run_id,
+            event_path or sandbox_path,
+            content,
+            source_agent=source_agent,
+        )
 
     # ─── QA Delegation ────────────────────────────────────────────────────
 
@@ -304,6 +399,9 @@ class TaskDelegator:
             context={
                 "workspace_id": self._workspace_id,
                 "mcp_token": self._mcp_token,
+                "goal": self._goal,
+                "task_label": self._task.label,
+                "task_acceptance": self._task.acceptance_criteria,
             },
             llm_config=self._llm_configs.get("qa"),
         )
@@ -380,20 +478,14 @@ class TaskDelegator:
         instead of host-side Path.exists() / Path.read_text().
         """
         try:
-            from ..services.openhands_client import get_openhands_client
-            client = get_openhands_client()
-            runtime = client.get_runtime("repo-main")
-            content = runtime.read_file("/workspace/critique_report.md")
-
-            await self._mgr._emit_fs_update(
-                self._run_id,
-                "critique_report.md",
-                content,
+            await self._emit_workspace_artifact(
+                sandbox_path="/workspace/critique_report.md",
+                event_path="critique_report.md",
                 source_agent="qa",
             )
             logger.info(
-                "Emitted fs:update for critique_report.md (%d bytes) on run %s",
-                len(content), self._run_id,
+                "Emitted fs:update for critique_report.md on run %s",
+                self._run_id,
             )
         except FileNotFoundError:
             logger.debug(
@@ -469,7 +561,7 @@ class TaskDelegator:
         try:
             from ..services.openhands_client import get_openhands_client
             client = get_openhands_client()
-            runtime = client.get_runtime("repo-main")
+            runtime = client.get_runtime(self._workspace_id)
             runtime.write_file("/workspace/leader_guidance.md", guidance)
             logger.info(
                 "Wrote leader_guidance.md (%d bytes) via SDK for run %s",
@@ -482,8 +574,10 @@ class TaskDelegator:
             )
 
         # ── Emit fs:update so frontend displays the artifact ─────────
-        await self._mgr._emit_fs_update(
-            self._run_id, "leader_guidance.md", guidance, source_agent="tech-lead",
+        await self._emit_workspace_artifact(
+            sandbox_path="/workspace/leader_guidance.md",
+            event_path="leader_guidance.md",
+            source_agent="tech-lead",
         )
 
         await self._mgr._emit_agent_message(self._run_id, "tech-lead", "Tech Lead",
@@ -799,7 +893,7 @@ class RunManager:
                 return
 
             # Store tasks in DB
-            tasks: list[AgentTask] = leader_result.tasks
+            tasks: list[AgentTask] = _scope_task_ids(run_id, leader_result.tasks)
             task_dicts = [
                 {"id": t.id, "label": t.label, "acceptanceCriteria": t.acceptance_criteria,
                  "status": "pending", "agent": "dev"}
@@ -853,6 +947,9 @@ class RunManager:
                     f"Task: {task.label}\n"
                     f"Acceptance Criteria: {task.acceptance_criteria}"
                 )
+                task_path_guidance = _build_task_path_guidance(task)
+                if task_path_guidance:
+                    task_goal = f"{task_goal}\n\n{task_path_guidance}"
 
                 delegator = TaskDelegator(
                     run_manager=self,
@@ -952,7 +1049,11 @@ class RunManager:
                     return
 
                 # ── Inject re-planned tasks into the dispatch queue ──
-                new_tasks: list[AgentTask] = replan_result.tasks
+                new_tasks: list[AgentTask] = _scope_task_ids(
+                    run_id,
+                    replan_result.tasks,
+                    start_index=len(tasks),
+                )
                 new_task_dicts = [
                     {"id": t.id, "label": t.label,
                      "acceptanceCriteria": t.acceptance_criteria,

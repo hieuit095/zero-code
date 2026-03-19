@@ -1,4 +1,11 @@
 /**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
+/**
  * WebSocket and REST contract types for the run lifecycle described in `plan.md` section 3.
  *
  * Expected server envelope JSON shape:

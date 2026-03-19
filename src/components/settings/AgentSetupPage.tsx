@@ -1,3 +1,10 @@
+/**
+ * ==========================================
+ * Author: Hieu Nguyen - Codev Team
+ * Email: hieuit095@gmail.com
+ * Project: ZeroCode - Autonomous Multi-Agent IDE
+ * ==========================================
+ */
 // @ai-module: Settings — Agent Setup Page
 // @ai-role: Settings panel for configuring per-agent AI model selection and system prompt editing.
 //           Model and prompt state is persisted via useSettingsStore (Zustand + localStorage).
@@ -8,7 +15,6 @@
 import { useState } from 'react';
 import {
   Bot,
-  ChevronDown,
   RotateCcw,
   Sparkles,
   Info,
@@ -21,31 +27,7 @@ import {
 import type { AgentRole } from '../../types';
 import { useSettingsStore } from '../../stores/settingsStore';
 
-interface ModelOption {
-  id: string;
-  name: string;
-  provider: string;
-  contextWindow: string;
-  tier: 'fast' | 'balanced' | 'powerful';
-  recommended?: boolean;
-}
-
-const MODELS: ModelOption[] = [
-  { id: 'gpt-4o', name: 'GPT-4o', provider: 'OpenAI', contextWindow: '128k', tier: 'powerful', recommended: true },
-  { id: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', contextWindow: '128k', tier: 'fast' },
-  { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', provider: 'Anthropic', contextWindow: '200k', tier: 'powerful' },
-  { id: 'claude-3-haiku', name: 'Claude 3 Haiku', provider: 'Anthropic', contextWindow: '200k', tier: 'fast' },
-  { id: 'gemini-1-5-pro', name: 'Gemini 1.5 Pro', provider: 'Google', contextWindow: '1M', tier: 'powerful' },
-  { id: 'gemini-1-5-flash', name: 'Gemini 1.5 Flash', provider: 'Google', contextWindow: '1M', tier: 'fast' },
-  { id: 'llama-3-70b', name: 'Llama 3 70B', provider: 'Meta', contextWindow: '8k', tier: 'balanced' },
-  { id: 'mistral-large', name: 'Mistral Large', provider: 'Mistral', contextWindow: '128k', tier: 'balanced' },
-];
-
-const TIER_STYLES: Record<ModelOption['tier'], string> = {
-  fast: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/25',
-  balanced: 'text-amber-300 bg-amber-500/10 border-amber-500/25',
-  powerful: 'text-sky-300 bg-sky-500/10 border-sky-500/25',
-};
+// Removed MODELS and TIER_STYLES constants as we now support arbitrary inputs
 
 interface AgentConfig {
   role: AgentRole;
@@ -96,9 +78,11 @@ const AGENT_CONFIGS: AgentConfig[] = [
 
 interface AgentCardProps {
   config: AgentConfig;
+  provider: string;
   model: string;
   prompt: string;
   locked: boolean;
+  onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onPromptChange: (prompt: string) => void;
   onToggleLock: () => void;
@@ -106,72 +90,43 @@ interface AgentCardProps {
 }
 
 function ModelDropdown({
-  value,
-  onChange,
+  provider,
+  model,
+  onProviderChange,
+  onModelChange,
 }: {
-  value: string;
-  onChange: (v: string) => void;
+  provider: string;
+  model: string;
+  onProviderChange: (v: string) => void;
+  onModelChange: (v: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const selected = MODELS.find((m) => m.id === value) ?? MODELS[0];
-
   return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen((p) => !p)}
-        className="flex items-center gap-2 w-full px-3 py-2 rounded-md bg-slate-900 border border-slate-700 hover:border-slate-600 text-sm transition-colors"
-      >
-        <span className="text-slate-200 text-xs font-medium flex-1 text-left">{selected.name}</span>
-        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border capitalize ${TIER_STYLES[selected.tier]}`}>
-          {selected.tier}
-        </span>
-        <span className="text-[10px] text-slate-500">{selected.provider}</span>
-        <ChevronDown className={`w-3 h-3 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
-
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute z-20 top-full mt-1 left-0 right-0 bg-slate-900 border border-slate-700 rounded-md shadow-xl overflow-hidden">
-            {MODELS.map((m) => (
-              <button
-                key={m.id}
-                onClick={() => { onChange(m.id); setOpen(false); }}
-                className={`flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-slate-800 transition-colors ${value === m.id ? 'bg-sky-500/10' : ''
-                  }`}
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs text-slate-200 font-medium">{m.name}</span>
-                    {m.recommended && (
-                      <span className="text-[9px] text-sky-400 bg-sky-500/10 border border-sky-500/20 px-1 rounded">
-                        Recommended
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <span className="text-[10px] text-slate-500">{m.provider}</span>
-                    <span className="text-[10px] text-slate-600">·</span>
-                    <span className="text-[10px] text-slate-500">{m.contextWindow} ctx</span>
-                  </div>
-                </div>
-                <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border capitalize shrink-0 ${TIER_STYLES[m.tier]}`}>
-                  {m.tier}
-                </span>
-              </button>
-            ))}
-          </div>
-        </>
-      )}
+    <div className="flex gap-2">
+      <input
+        type="text"
+        value={provider}
+        onChange={(e) => onProviderChange(e.target.value)}
+        placeholder="Provider (e.g. OpenAI)"
+        className="w-1/3 px-3 py-2 rounded-md bg-slate-900 border border-slate-700 hover:border-slate-600 focus:border-sky-500/60 focus:bg-slate-900/80 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none transition-colors"
+      />
+      <input
+        type="text"
+        value={model}
+        onChange={(e) => onModelChange(e.target.value)}
+        placeholder="Model ID (e.g. gpt-4o)"
+        className="flex-1 px-3 py-2 rounded-md bg-slate-900 border border-slate-700 hover:border-slate-600 focus:border-sky-500/60 focus:bg-slate-900/80 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none transition-colors"
+      />
     </div>
   );
 }
 
 function AgentCard({
   config,
+  provider,
   model,
   prompt,
   locked,
+  onProviderChange,
   onModelChange,
   onPromptChange,
   onToggleLock,
@@ -217,9 +172,9 @@ function AgentCard({
         <div>
           <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-widest mb-1.5">
             <Bot className="w-3 h-3" />
-            Model
+            Provider & Model
           </label>
-          <ModelDropdown value={model} onChange={onModelChange} />
+          <ModelDropdown provider={provider} model={model} onProviderChange={onProviderChange} onModelChange={onModelChange} />
         </div>
 
         <div>
@@ -265,7 +220,7 @@ export function AgentSetupPage() {
     qa: true,
   });
 
-  const setModel = (role: AgentRole, model: string) => setAgentModel(role, model);
+  const setModel = (role: AgentRole, provider: string, model: string) => setAgentModel(role, provider, model);
   const setPrompt = (role: AgentRole, prompt: string) => setAgentSystemPrompt(role, prompt);
   const toggleLock = (role: AgentRole) =>
     setLocked((p) => ({ ...p, [role]: !p[role] }));
@@ -295,10 +250,12 @@ export function AgentSetupPage() {
           <AgentCard
             key={cfg.role}
             config={cfg}
+            provider={agentModels[cfg.role].provider}
             model={agentModels[cfg.role].model}
             prompt={agentModels[cfg.role].systemPrompt ?? AGENT_CONFIGS.find((c) => c.role === cfg.role)!.defaultPrompt}
             locked={locked[cfg.role]}
-            onModelChange={(m) => setModel(cfg.role, m)}
+            onProviderChange={(p) => setModel(cfg.role, p, agentModels[cfg.role].model)}
+            onModelChange={(m) => setModel(cfg.role, agentModels[cfg.role].provider, m)}
             onPromptChange={(p) => setPrompt(cfg.role, p)}
             onToggleLock={() => toggleLock(cfg.role)}
             onResetPrompt={() => resetPrompt(cfg.role)}

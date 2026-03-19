@@ -1,0 +1,8 @@
+{
+  "command": "cat '/workspace/smoke_test.txt'",
+  "cwd": "/workspace",
+  "timeout": 30,
+  "id": "032ee9b7a06c4498a50b8bb16fec9c3f",
+  "timestamp": "2026-03-18T15:13:25.552396Z",
+  "kind": "BashCommand"
+}
