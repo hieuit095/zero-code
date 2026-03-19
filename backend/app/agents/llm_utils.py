@@ -13,6 +13,7 @@ models are a notable case: a model like `moonshotai/Kimi-K2.5` must be sent as
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -140,6 +141,26 @@ def extract_message_text(message: Any) -> str:
     text = getattr(message, "text", None)
     if isinstance(text, str) and text:
         return text.strip()
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if isinstance(tool_calls, list):
+        for tool_call in tool_calls:
+            name = str(getattr(tool_call, "name", "") or "").strip().lower()
+            if name != "finish":
+                continue
+
+            arguments = getattr(tool_call, "arguments", None)
+            if not isinstance(arguments, str) or not arguments.strip():
+                continue
+
+            try:
+                payload = json.loads(arguments)
+            except json.JSONDecodeError:
+                continue
+
+            finish_message = payload.get("message")
+            if isinstance(finish_message, str) and finish_message.strip():
+                return finish_message.strip()
 
     return str(message).strip()
 

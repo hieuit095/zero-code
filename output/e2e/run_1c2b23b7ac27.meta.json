@@ -1,0 +1,10 @@
+{
+  "run": {
+    "runId": "run_1c2b23b7ac27",
+    "workspaceId": "repo-e2e-live-20260319-d",
+    "status": "queued",
+    "wsUrl": "ws://127.0.0.1:8000/ws/runs/run_1c2b23b7ac27"
+  },
+  "goal": "Create a Python script named calculator.py that implements basic arithmetic (add, subtract, multiply, divide). Then, create a test_calculator.py using pytest. Ensure the Dev writes the code, the QA runs pytest, and the Leader intervenes if tests fail.",
+  "workspaceId": "repo-e2e-live-20260319-d"
+}

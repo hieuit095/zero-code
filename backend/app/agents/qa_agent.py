@@ -1006,6 +1006,9 @@ class QaAgent:
             return True
         if "test_" in task_label or "test_" in task_acceptance:
             return True
+        expected_files = self._extract_expected_workspace_files(context)
+        if any(path.lower().endswith(".py") for path in changed_files + expected_files):
+            return True
         return any(
             path.lower().endswith(".py") and "/test" in path.lower()
             for path in changed_files
@@ -1073,6 +1076,21 @@ class QaAgent:
         context: dict[str, Any],
     ) -> list[str]:
         """Parse expected root-level filenames from the task label/acceptance."""
+        allowed_suffixes = {
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".json",
+            ".md",
+            ".txt",
+            ".html",
+            ".css",
+            ".ini",
+            ".yml",
+            ".yaml",
+        }
         filenames: list[str] = []
         for text in (
             str(context.get("task_label", "") or ""),
@@ -1080,6 +1098,8 @@ class QaAgent:
         ):
             for candidate in re.findall(r"\b[A-Za-z0-9_.-]+\.[A-Za-z0-9]+\b", text):
                 if "/" in candidate or "\\" in candidate:
+                    continue
+                if Path(candidate).suffix.lower() not in allowed_suffixes:
                     continue
                 workspace_file = f"/workspace/{candidate}"
                 if workspace_file not in filenames:

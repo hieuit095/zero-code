@@ -54,13 +54,19 @@ def _get_jwt_secret() -> str:
 # ─── Token Generation ────────────────────────────────────────────────────────
 
 
-def generate_mcp_token(run_id: str, expiry_minutes: int = _JWT_EXPIRY_MINUTES) -> str:
+def generate_mcp_token(
+    run_id: str,
+    *,
+    workspace_id: str | None = None,
+    expiry_minutes: int = _JWT_EXPIRY_MINUTES,
+) -> str:
     """
     Generate a short-lived JWT scoped to a specific run.
 
     Claims:
       - sub: run_id
       - purpose: "mcp_facade"
+      - workspace_id: optional run-scoped workspace identifier
       - iat: issued at
       - exp: expiry time
     """
@@ -69,6 +75,7 @@ def generate_mcp_token(run_id: str, expiry_minutes: int = _JWT_EXPIRY_MINUTES) -
     payload = {
         "sub": run_id,
         "purpose": "mcp_facade",
+        "workspace_id": workspace_id,
         "iat": now,
         "exp": now + timedelta(minutes=expiry_minutes),
     }

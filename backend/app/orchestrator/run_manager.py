@@ -122,6 +122,71 @@ def _build_task_path_guidance(task: AgentTask) -> str:
     return "\n".join(guidance_lines)
 
 
+def _is_verification_only_task(task: AgentTask) -> bool:
+    """
+    Detect planner tasks that should be handled by QA, not Dev.
+
+    Examples:
+      - "Run pytest to verify all tests pass"
+      - "Verify lint and typecheck succeed"
+    """
+    label = (task.label or "").strip().lower()
+    acceptance = str(task.acceptance_criteria or "").strip().lower()
+    combined = f"{label}\n{acceptance}"
+
+    verification_starts = (
+        "run ",
+        "verify ",
+        "execute ",
+        "check ",
+        "confirm ",
+    )
+    verification_targets = (
+        "pytest",
+        "tests pass",
+        "test suite",
+        "lint",
+        "typecheck",
+        "compile",
+    )
+
+    return label.startswith(verification_starts) and any(
+        target in combined for target in verification_targets
+    )
+
+
+def _collapse_verification_only_tasks(tasks: list[AgentTask]) -> list[AgentTask]:
+    """
+    Merge redundant verification-only planner tasks into the prior task.
+
+    QA already executes verification after every Dev task. When the Leader still
+    emits a terminal "Run pytest" task, keeping it as a separate Dev iteration
+    creates redundant work and can stall the run.
+    """
+    collapsed: list[AgentTask] = []
+
+    for task in tasks:
+        if collapsed and _is_verification_only_task(task):
+            prior = collapsed[-1]
+            extra_criteria = str(task.acceptance_criteria or "").strip()
+            if extra_criteria and extra_criteria not in str(prior.acceptance_criteria or ""):
+                if prior.acceptance_criteria:
+                    prior.acceptance_criteria = (
+                        f"{prior.acceptance_criteria} Also verify: {extra_criteria}"
+                    )
+                else:
+                    prior.acceptance_criteria = extra_criteria
+            logger.info(
+                "Collapsed verification-only task into prior task: %s",
+                task.label,
+            )
+            continue
+
+        collapsed.append(task)
+
+    return collapsed
+
+
 def _scope_task_ids(
     run_id: str,
     tasks: list[AgentTask],
@@ -848,7 +913,11 @@ class RunManager:
         # Generate JWT for MCP facade (legacy — retained for backward compat)
         # AUDIT FIX: Extended from 30 min to 12 hours (720 min) to prevent
         # token expiration during long-running multi-agent compile/retry loops.
-        mcp_token = generate_mcp_token(run_id, expiry_minutes=720)
+        mcp_token = generate_mcp_token(
+            run_id,
+            workspace_id=workspace_id,
+            expiry_minutes=720,
+        )
         # NOTE: set_run_token removed — native SDK tools no longer use JWT tokens.
 
         # ── Load dynamic LLM config from DB ────────────────────────
@@ -893,7 +962,8 @@ class RunManager:
                 return
 
             # Store tasks in DB
-            tasks: list[AgentTask] = _scope_task_ids(run_id, leader_result.tasks)
+            planned_tasks = _collapse_verification_only_tasks(leader_result.tasks)
+            tasks: list[AgentTask] = _scope_task_ids(run_id, planned_tasks)
             task_dicts = [
                 {"id": t.id, "label": t.label, "acceptanceCriteria": t.acceptance_criteria,
                  "status": "pending", "agent": "dev"}
@@ -1049,9 +1119,12 @@ class RunManager:
                     return
 
                 # ── Inject re-planned tasks into the dispatch queue ──
+                replanned_tasks = _collapse_verification_only_tasks(
+                    replan_result.tasks
+                )
                 new_tasks: list[AgentTask] = _scope_task_ids(
                     run_id,
-                    replan_result.tasks,
+                    replanned_tasks,
                     start_index=len(tasks),
                 )
                 new_task_dicts = [
@@ -1085,12 +1158,15 @@ class RunManager:
             # ══════════════════════════════════════════════════════════
             duration_ms = int((time.monotonic() - start_time) * 1000)
             await self._update_run_status(run_id, RunState.COMPLETED, "done", 100)
+            async with async_session() as session:
+                completion_metrics = await RunStore.get_run_metrics(session, run_id)
+            qa_retry_count = int((completion_metrics or {}).get("qaFailureCount", 0))
 
             await self._emit(run_id, "run:complete", {
                 "status": "completed",
                 "summary": f"All {total_tasks} tasks completed successfully.",
                 "changedFiles": list(set(all_files_changed)),
-                "qaRetries": 0,
+                "qaRetries": qa_retry_count,
                 "durationMs": duration_ms,
             })
 

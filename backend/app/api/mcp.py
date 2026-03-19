@@ -163,5 +163,5 @@ def mount_mcp_facade(app: FastAPI) -> None:
 
 logger.info(
     "MCP Facade mounted (JWT-protected): /internal/mcp/{dev,qa,tech-lead}/sse "
-    "(workspace: %s)", _workspace_root,
+    "(default workspace fallback: %s)", _workspace_root,
 )
