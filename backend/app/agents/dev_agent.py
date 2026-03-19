@@ -248,7 +248,11 @@ class DevAgent:
 
             conversation.send_message(user_message)
             try:
-                conversation.run()
+                # HANG FIX: conversation.run() is synchronous and blocks the
+                # asyncio event loop for the entire LLM execution (minutes for
+                # complex tasks). Offload to a thread so Redis publishes,
+                # WebSocket heartbeats, and other coroutines keep running.
+                await asyncio.to_thread(conversation.run)
             except Exception as exc:
                 conversation_error = exc
                 logger.warning(

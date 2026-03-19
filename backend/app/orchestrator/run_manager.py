@@ -1037,7 +1037,20 @@ class RunManager:
                     max_retries=MAX_QA_RETRIES,
                 )
 
-                task_result, last_files, is_internal_error = await delegator.execute()
+                # HANG FIX: Wall-clock timeout prevents a single task from
+                # running indefinitely if the LLM stalls or enters a loop.
+                try:
+                    task_result, last_files, is_internal_error = await asyncio.wait_for(
+                        delegator.execute(), timeout=600,  # 10 minutes per task
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Task '%s' timed out after 600s on run %s",
+                        task.label, run_id,
+                    )
+                    await self._emit_agent_message(run_id, "dev", "Dev",
+                        f"Task timed out after 10 minutes: {task.label}")
+                    task_result, last_files, is_internal_error = "failed", [], False
 
                 if task_result == "completed":
                     await self._persist_task_status(task.id, "completed")

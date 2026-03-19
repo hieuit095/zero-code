@@ -217,6 +217,9 @@ export function useRunConnection(): UseRunConnectionReturn {
     isHydratingRef.current = false;
     pendingEventsRef.current = [];
 
+    // Reset to 'idle' — user explicitly ended the run, not a connection failure
+    setConnectionStatus('idle');
+
     setState((current) => ({
       ...current,
       isConnected: false,
@@ -584,6 +587,11 @@ export function useRunConnection(): UseRunConnectionReturn {
     socket.onmessage = (messageEvent) => {
       try {
         const parsed: unknown = JSON.parse(messageEvent.data);
+
+        // Heartbeat events keep the connection alive — silently ignore them.
+        if (typeof parsed === 'object' && parsed !== null && (parsed as Record<string, unknown>).type === 'heartbeat') {
+          return;
+        }
 
         if (!isRunSocketServerEvent(parsed)) {
           throw new Error('Received an unknown websocket message shape.');

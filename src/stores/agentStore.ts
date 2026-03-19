@@ -57,7 +57,7 @@ interface QaRetryState {
   failingDimensions: string[];
 }
 
-type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
+type ConnectionStatus = 'idle' | 'connected' | 'disconnected' | 'reconnecting';
 
 interface AgentState {
   messages: AgentMessage[];
@@ -120,7 +120,7 @@ export const useAgentStore = create<AgentState>((set) => ({
   runStatus: null,
   runProgress: 0,
   qaRetryState: null,
-  connectionStatus: 'disconnected' as ConnectionStatus,
+  connectionStatus: 'idle' as ConnectionStatus,
   streamingMessages: {},
   qaScoreHistory: [],
 
@@ -230,7 +230,7 @@ export const useAgentStore = create<AgentState>((set) => ({
       runStatus: null,
       runProgress: 0,
       qaRetryState: null,
-      connectionStatus: 'disconnected' as ConnectionStatus,
+      connectionStatus: 'idle' as ConnectionStatus,
       streamingMessages: {},
       qaScoreHistory: [],
     }),

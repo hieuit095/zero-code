@@ -535,7 +535,9 @@ class QaAgent:
 
             conversation.send_message(user_message)
             try:
-                conversation.run()
+                # HANG FIX: conversation.run() is synchronous — offload to thread pool
+                # so the event loop stays alive for Redis pub/sub and WebSocket pings.
+                await asyncio.to_thread(conversation.run)
             except Exception as exc:
                 logger.warning(
                     "QA agent conversation failed for run=%s task=%s attempt=%s; "

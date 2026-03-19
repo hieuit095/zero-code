@@ -73,6 +73,7 @@ export function Header() {
     resetAgent();
   };
 
+  // Only show when a run connection has actually dropped — not in the default 'idle' state
   const showDisconnectBanner = connectionStatus === 'disconnected' || connectionStatus === 'reconnecting';
 
   return (

@@ -22,6 +22,7 @@ Output:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -373,7 +374,9 @@ class LeaderAgent:
             )
 
             conversation.send_message(user_message)
-            conversation.run()
+            # HANG FIX: conversation.run() is synchronous — offload to thread pool
+            # so the event loop stays alive for Redis pub/sub and WebSocket pings.
+            await asyncio.to_thread(conversation.run)
 
             # ── Extract structured result from LLM output ──────────────
             raw_output = extract_last_assistant_text(llm_messages)

@@ -125,10 +125,30 @@ async def run_websocket(websocket: WebSocket, run_id: str) -> None:
             except Exception:
                 logger.exception("Unhandled error in listen_client for run %s", run_id)
 
-        # Run both tasks concurrently
+        # ── Task 3: Heartbeat to prevent idle WebSocket timeout ───
+        async def heartbeat() -> None:
+            """Send periodic pings to keep the WebSocket alive.
+
+            Browser WebSocket connections (and many proxies) drop idle
+            connections after ~60 seconds. During long LLM calls, no
+            Redis events flow, so the connection goes idle. This task
+            sends a lightweight heartbeat every 20 seconds.
+            """
+            try:
+                while True:
+                    await asyncio.sleep(20)
+                    await websocket.send_json({
+                        "type": "heartbeat",
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    })
+            except Exception:
+                logger.debug("Heartbeat stopped for run %s", run_id)
+
+        # Run all three tasks concurrently
         forward_task = asyncio.create_task(forward_events())
         listen_task = asyncio.create_task(listen_client())
-        tasks = [forward_task, listen_task]
+        heartbeat_task = asyncio.create_task(heartbeat())
+        tasks = [forward_task, listen_task, heartbeat_task]
 
         # Wait for either to complete
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
