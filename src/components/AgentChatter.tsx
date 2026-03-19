@@ -26,6 +26,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bot, Send, Loader2, Brain, Wrench, MessageSquare, Zap } from 'lucide-react';
 import type { AgentRole, AgentMessage, AgentStatuses, ActiveActivities } from '../types';
+import type { StreamingMessage } from '../stores/agentStore';
 import { AgentSkills } from './AgentSkills';
 
 type BottomTab = 'chat' | 'skills';
@@ -112,17 +113,21 @@ interface AgentChatterProps {
   messages: AgentMessage[];
   agentStatuses: AgentStatuses;
   activeActivities: ActiveActivities;
+  streamingMessages: Record<string, StreamingMessage>;
 }
 
-export function AgentChatter({ messages, agentStatuses, activeActivities }: AgentChatterProps) {
+export function AgentChatter({ messages, agentStatuses, activeActivities, streamingMessages }: AgentChatterProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<BottomTab>('chat');
+
+  const streamingEntries = Object.entries(streamingMessages);
+  const hasStreamingContent = streamingEntries.length > 0;
 
   useEffect(() => {
     if (activeTab === 'chat') {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages.length, activeTab]);
+  }, [messages.length, hasStreamingContent, activeTab]);
 
   const anyActive = (Object.keys(agentStatuses) as AgentRole[]).some(
     (r) => agentStatuses[r] !== 'idle'
@@ -206,6 +211,34 @@ export function AgentChatter({ messages, agentStatuses, activeActivities }: Agen
               </div>
             );
           })}
+
+          {/* ── Streaming Messages (in-flight LLM tokens) ──────────────── */}
+          {streamingEntries.map(([msgId, stream]) => {
+            const cfg = agentConfig[stream.role];
+            return (
+              <div key={`stream-${msgId}`} className="group">
+                <div className="flex items-start gap-2">
+                  <div className={`mt-0.5 shrink-0 flex items-center justify-center w-5 h-5 rounded ${cfg.bg} border ${cfg.border}`}>
+                    <Bot className={`w-3 h-3 ${cfg.color} animate-pulse`} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className={`text-[11px] font-semibold ${cfg.color}`}>{cfg.label}</span>
+                      <span className="text-[10px] text-sky-500/60 flex items-center gap-1">
+                        <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                        streaming
+                      </span>
+                    </div>
+                    <p className="text-[12px] text-slate-300 leading-relaxed break-words">
+                      {stream.content}
+                      <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-sky-400/70 animate-pulse rounded-sm align-text-bottom" />
+                    </p>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
           <div ref={bottomRef} />
         </div>
 

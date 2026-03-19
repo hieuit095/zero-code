@@ -20,6 +20,32 @@
 import { create } from 'zustand';
 import type { AgentMessage, Task, AgentRole, AgentStatus, AgentStatuses, ActiveActivities } from '../types';
 
+// ── Streaming message buffer ─────────────────────────────────────────────────
+// Holds in-flight LLM token deltas keyed by messageId. Each entry accumulates
+// real `agent:message:delta` WebSocket payloads until the final `agent:message`
+// event arrives, at which point the entry is removed and the complete message
+// is added to the persistent `messages[]` array.
+
+export interface StreamingMessage {
+  role: AgentRole;
+  content: string;
+}
+
+// ── QA score history entry ───────────────────────────────────────────────────
+// Persists each QA evaluation (report or pass) so the QA Dashboard can render
+// score trends across retries. Populated exclusively from real `qa:report` and
+// `qa:passed` WebSocket events — never from mocks or hardcoded data.
+
+export interface QaScoreEntry {
+  taskId: string;
+  attempt: number;
+  status: 'failed' | 'passed';
+  scores: Record<string, number>;
+  failingDimensions: string[];
+  summary: string;
+  timestamp: string;
+}
+
 interface QaRetryState {
   taskId: string;
   attempt: number;
@@ -43,6 +69,12 @@ interface AgentState {
   qaRetryState: QaRetryState | null;
   connectionStatus: ConnectionStatus;
 
+  // ── Phase 1: Streaming buffer ──────────────────────────────────────────
+  streamingMessages: Record<string, StreamingMessage>;
+
+  // ── Phase 2: QA score history ──────────────────────────────────────────
+  qaScoreHistory: QaScoreEntry[];
+
   addMessage: (message: Omit<AgentMessage, 'id'>) => void;
   addMessageFromServer: (message: AgentMessage) => void;
   updateAgentStatus: (agent: AgentRole, status: AgentStatus, activity?: string | null) => void;
@@ -53,6 +85,16 @@ interface AgentState {
   setQaRetryState: (state: QaRetryState) => void;
   clearQaRetryState: () => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
+
+  // ── Phase 1: Streaming actions ─────────────────────────────────────────
+  startStreamingMessage: (messageId: string, role: AgentRole) => void;
+  appendStreamingDelta: (messageId: string, delta: string) => void;
+  finalizeStreamingMessage: (messageId: string) => void;
+
+  // ── Phase 2: QA history actions ────────────────────────────────────────
+  pushQaScore: (entry: QaScoreEntry) => void;
+  clearQaScoreHistory: () => void;
+
   resetToInitial: () => void;
 }
 
@@ -79,6 +121,8 @@ export const useAgentStore = create<AgentState>((set) => ({
   runProgress: 0,
   qaRetryState: null,
   connectionStatus: 'disconnected' as ConnectionStatus,
+  streamingMessages: {},
+  qaScoreHistory: [],
 
   // Client-side message creation (fallback when server doesn't provide id/timestamp)
   addMessage: (message) => {
@@ -132,6 +176,51 @@ export const useAgentStore = create<AgentState>((set) => ({
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
 
+  // ── Phase 1: Streaming buffer actions ────────────────────────────────
+
+  startStreamingMessage: (messageId, role) => {
+    set((state) => ({
+      streamingMessages: {
+        ...state.streamingMessages,
+        [messageId]: { role, content: '' },
+      },
+    }));
+  },
+
+  appendStreamingDelta: (messageId, delta) => {
+    set((state) => {
+      const existing = state.streamingMessages[messageId];
+      if (!existing) return state;
+      return {
+        streamingMessages: {
+          ...state.streamingMessages,
+          [messageId]: {
+            ...existing,
+            content: existing.content + delta,
+          },
+        },
+      };
+    });
+  },
+
+  finalizeStreamingMessage: (messageId) => {
+    set((state) => {
+      const next = { ...state.streamingMessages };
+      delete next[messageId];
+      return { streamingMessages: next };
+    });
+  },
+
+  // ── Phase 2: QA history actions ──────────────────────────────────────
+
+  pushQaScore: (entry) => {
+    set((state) => ({
+      qaScoreHistory: [...state.qaScoreHistory, entry],
+    }));
+  },
+
+  clearQaScoreHistory: () => set({ qaScoreHistory: [] }),
+
   resetToInitial: () =>
     set({
       messages: [],
@@ -142,5 +231,7 @@ export const useAgentStore = create<AgentState>((set) => ({
       runProgress: 0,
       qaRetryState: null,
       connectionStatus: 'disconnected' as ConnectionStatus,
+      streamingMessages: {},
+      qaScoreHistory: [],
     }),
 }));

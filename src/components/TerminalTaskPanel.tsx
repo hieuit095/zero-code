@@ -24,18 +24,19 @@
 
 
 import { useState } from 'react';
-import { Terminal, ListChecks, Maximize2 } from 'lucide-react';
+import { Terminal, ListChecks, Maximize2, Shield } from 'lucide-react';
 import { TerminalPanel } from './TerminalPanel';
 import { TasksPanel } from './TasksPanel';
+import { QADashboard } from './QADashboard';
 import { useTerminalStream } from '../hooks/useTerminalStream';
 import { useAgentConnection } from '../hooks/useAgentConnection';
 
-type PanelTab = 'terminal' | 'tasks';
+type PanelTab = 'terminal' | 'tasks' | 'qa';
 
 export function TerminalTaskPanel() {
   const [activeTab, setActiveTab] = useState<PanelTab>('terminal');
   const { logLines, isStreaming } = useTerminalStream();
-  const { tasks, qaRetryState } = useAgentConnection();
+  const { tasks, qaRetryState, qaScoreHistory } = useAgentConnection();
 
   const activeTaskCount = tasks.filter((t) => t.status !== 'completed').length;
 
@@ -71,6 +72,21 @@ export function TerminalTaskPanel() {
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse ml-0.5" />
           )}
         </button>
+        <button
+          onClick={() => setActiveTab('qa')}
+          className={`flex items-center gap-1.5 px-3 h-full text-xs font-medium border-b-2 transition-colors ${activeTab === 'qa'
+              ? 'border-emerald-500 text-emerald-300'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+        >
+          <Shield className="w-3 h-3" />
+          QA
+          {qaScoreHistory.length > 0 && (
+            <span className="ml-0.5 text-[10px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 rounded px-1">
+              {qaScoreHistory.length}
+            </span>
+          )}
+        </button>
         <div className="flex-1" />
         <button className="p-1 rounded hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors">
           <Maximize2 className="w-3 h-3" />
@@ -83,6 +99,9 @@ export function TerminalTaskPanel() {
         </div>
         <div className={activeTab === 'tasks' ? 'flex flex-col h-full overflow-hidden' : 'hidden'}>
           <TasksPanel tasks={tasks} qaRetryState={qaRetryState} />
+        </div>
+        <div className={activeTab === 'qa' ? 'flex flex-col h-full overflow-hidden' : 'hidden'}>
+          <QADashboard qaScoreHistory={qaScoreHistory} />
         </div>
       </div>
     </div>

@@ -23,7 +23,7 @@ import { AgentChatter } from './AgentChatter';
 import { useAgentConnection } from '../hooks/useAgentConnection';
 
 export function LeftSidebar() {
-  const { messages, agentStatuses, activeActivities } = useAgentConnection();
+  const { messages, agentStatuses, activeActivities, streamingMessages } = useAgentConnection();
 
   return (
     <div className="flex flex-col border-r border-slate-800 bg-slate-950 h-full">
@@ -42,6 +42,7 @@ export function LeftSidebar() {
               messages={messages}
               agentStatuses={agentStatuses}
               activeActivities={activeActivities}
+              streamingMessages={streamingMessages}
             />
           </div>
         </Panel>

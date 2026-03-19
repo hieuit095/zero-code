@@ -16,6 +16,7 @@
 // [AI-STRICT] UI components MUST import from this hook, never from agentStore directly.
 
 import { useAgentStore } from '../stores/agentStore';
+import type { StreamingMessage, QaScoreEntry } from '../stores/agentStore';
 import type { AgentMessage, Task, AgentRole, AgentStatuses, ActiveActivities } from '../types';
 
 export interface AgentConnectionReturn {
@@ -26,6 +27,8 @@ export interface AgentConnectionReturn {
   runStatus: string | null;
   runProgress: number;
   qaRetryState: ReturnType<typeof useAgentStore.getState>['qaRetryState'];
+  streamingMessages: Record<string, StreamingMessage>;
+  qaScoreHistory: QaScoreEntry[];
   sendMessage: (payload: unknown) => void;
 }
 
@@ -37,6 +40,8 @@ export function useAgentConnection(): AgentConnectionReturn {
   const runStatus = useAgentStore((s) => s.runStatus);
   const runProgress = useAgentStore((s) => s.runProgress);
   const qaRetryState = useAgentStore((s) => s.qaRetryState);
+  const streamingMessages = useAgentStore((s) => s.streamingMessages);
+  const qaScoreHistory = useAgentStore((s) => s.qaScoreHistory);
 
   return {
     messages,
@@ -46,6 +51,8 @@ export function useAgentConnection(): AgentConnectionReturn {
     runStatus,
     runProgress,
     qaRetryState,
+    streamingMessages,
+    qaScoreHistory,
     sendMessage: (_payload: unknown) => {
       // @ai-integration-point: Replace with ws.send(JSON.stringify(_payload))
     },

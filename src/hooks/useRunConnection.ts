@@ -161,6 +161,15 @@ export function useRunConnection(): UseRunConnectionReturn {
   const clearTerminal = useTerminalStore((state) => state.clearTerminal);
   const setTerminalStreaming = useTerminalStore((state) => state.setStreaming);
 
+  // Phase 1: Streaming buffer actions
+  const startStreamingMessage = useAgentStore((state) => state.startStreamingMessage);
+  const appendStreamingDelta = useAgentStore((state) => state.appendStreamingDelta);
+  const finalizeStreamingMessage = useAgentStore((state) => state.finalizeStreamingMessage);
+
+  // Phase 2: QA history actions
+  const pushQaScore = useAgentStore((state) => state.pushQaScore);
+  const clearQaScoreHistory = useAgentStore((state) => state.clearQaScoreHistory);
+
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(false);
@@ -253,6 +262,7 @@ export function useRunConnection(): UseRunConnectionReturn {
 
       case 'run:created': {
         clearTerminal();
+        clearQaScoreHistory();
         setState((current) => ({
           ...current,
           runId: event.runId,
@@ -304,13 +314,22 @@ export function useRunConnection(): UseRunConnectionReturn {
         break;
       }
 
-      case 'agent:message:start':
+      case 'agent:message:start': {
+        // Phase 1: Initialize the streaming buffer for this message
+        startStreamingMessage(event.data.messageId, event.data.role);
+        break;
+      }
+
       case 'agent:message:delta': {
-        // @ai-integration-point: agent:message streaming - Add a dedicated transient message buffer store for incremental thought streaming before persisting finalized `agent:message` events.
+        // Phase 1: Append real LLM token delta to the streaming buffer
+        appendStreamingDelta(event.data.messageId, event.data.delta);
         break;
       }
 
       case 'agent:message': {
+        // Phase 1: Finalize the streaming buffer — remove the in-flight entry
+        finalizeStreamingMessage(event.data.id);
+
         // Server-authoritative: preserves backend-provided id and timestamp
         addMessageFromServer({
           id: event.data.id,
@@ -397,6 +416,19 @@ export function useRunConnection(): UseRunConnectionReturn {
           timestamp: event.timestamp,
         });
 
+        // Phase 2: Persist QA evaluation to score history for the dashboard
+        if (event.data.scores && Object.keys(event.data.scores).length > 0) {
+          pushQaScore({
+            taskId: event.data.taskId,
+            attempt: event.data.attempt,
+            status: 'failed',
+            scores: event.data.scores,
+            failingDimensions: event.data.failingDimensions ?? [],
+            summary: event.data.summary,
+            timestamp: event.timestamp,
+          });
+        }
+
         event.data.rawLogTail.forEach((line) => {
           appendTerminalLine(line, 'error');
         });
@@ -418,6 +450,17 @@ export function useRunConnection(): UseRunConnectionReturn {
           });
           // Auto-clear the success banner after 5 seconds
           setTimeout(() => clearQaRetryState(), 5000);
+
+          // Phase 2: Persist QA pass to score history for the dashboard
+          pushQaScore({
+            taskId: event.data.taskId,
+            attempt: event.data.attempt,
+            status: 'passed',
+            scores: event.data.scores,
+            failingDimensions: [],
+            summary: event.data.summary,
+            timestamp: event.timestamp,
+          });
         } else {
           clearQaRetryState();
         }
