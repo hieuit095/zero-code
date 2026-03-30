@@ -15,17 +15,26 @@ Provides global system metrics for the admin dashboard:
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import func, select
 
+from ..config import get_settings
 from ..db.database import async_session
 from ..db.models import EventLogModel, RunModel, TaskModel
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+async def require_admin_auth(x_admin_key: str = Header(None)) -> str:
+    """Validate X-Admin-Key header against the configured api_key_secret."""
+    settings = get_settings()
+    if not x_admin_key or x_admin_key != settings.api_key_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized admin access")
+    return x_admin_key
+
+
 @router.get("/metrics")
-async def get_global_metrics() -> dict:
+async def get_global_metrics(authorize: str = Depends(require_admin_auth)) -> dict:
     """
     Aggregate global metrics from the database.
 
@@ -115,7 +124,7 @@ async def get_global_metrics() -> dict:
 
 
 @router.get("/recent-runs")
-async def get_recent_runs(limit: int = 10) -> list[dict]:
+async def get_recent_runs(limit: int = 10, authorize: str = Depends(require_admin_auth)) -> list[dict]:
     """Return the most recent runs for the admin dashboard table."""
     async with async_session() as session:
         result = await session.execute(

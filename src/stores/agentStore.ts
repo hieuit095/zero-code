@@ -29,6 +29,7 @@ import type { AgentMessage, Task, AgentRole, AgentStatus, AgentStatuses, ActiveA
 export interface StreamingMessage {
   role: AgentRole;
   content: string;
+  lastSeq: number;
 }
 
 // ── QA score history entry ───────────────────────────────────────────────────
@@ -78,7 +79,7 @@ interface AgentState {
   addMessage: (message: Omit<AgentMessage, 'id'>) => void;
   addMessageFromServer: (message: AgentMessage) => void;
   updateAgentStatus: (agent: AgentRole, status: AgentStatus, activity?: string | null) => void;
-  updateTask: (id: string, status: Task['status']) => void;
+  upsertTask: (id: string, status: Task['status']) => void;
   setTasks: (tasks: Task[]) => void;
   setRunStatus: (status: string | null) => void;
   setRunProgress: (progress: number) => void;
@@ -88,7 +89,7 @@ interface AgentState {
 
   // ── Phase 1: Streaming actions ─────────────────────────────────────────
   startStreamingMessage: (messageId: string, role: AgentRole) => void;
-  appendStreamingDelta: (messageId: string, delta: string) => void;
+  appendStreamingDelta: (messageId: string, delta: string, seq: number) => void;
   finalizeStreamingMessage: (messageId: string) => void;
 
   // ── Phase 2: QA history actions ────────────────────────────────────────
@@ -157,10 +158,18 @@ export const useAgentStore = create<AgentState>((set) => ({
     }));
   },
 
-  updateTask: (id, status) => {
-    set((state) => ({
-      tasks: state.tasks.map((t) => (t.id === id ? { ...t, status } : t)),
-    }));
+  upsertTask: (id, status) => {
+    set((state) => {
+      const idx = state.tasks.findIndex((t) => t.id === id);
+      if (idx !== -1) {
+        const updated = [...state.tasks];
+        updated[idx] = { ...updated[idx], status };
+        return { tasks: updated };
+      } else {
+        console.warn(`[agentStore] upsertTask: task ${id} not in array — inserted (possible out-of-order event)`);
+        return { tasks: [...state.tasks, { id, status, label: '', description: '' }] };
+      }
+    });
   },
 
   // Full task list hydration from task:snapshot events
@@ -182,21 +191,23 @@ export const useAgentStore = create<AgentState>((set) => ({
     set((state) => ({
       streamingMessages: {
         ...state.streamingMessages,
-        [messageId]: { role, content: '' },
+        [messageId]: { role, content: '', lastSeq: 0 },
       },
     }));
   },
 
-  appendStreamingDelta: (messageId, delta) => {
+  appendStreamingDelta: (messageId, delta, seq) => {
     set((state) => {
       const existing = state.streamingMessages[messageId];
       if (!existing) return state;
+      if (existing.lastSeq !== undefined && seq <= existing.lastSeq) return state;
       return {
         streamingMessages: {
           ...state.streamingMessages,
           [messageId]: {
             ...existing,
             content: existing.content + delta,
+            lastSeq: seq,
           },
         },
       };

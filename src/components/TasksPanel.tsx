@@ -11,7 +11,7 @@
 // @ai-dependencies: Props only (Task[] — sourced from useAgentConnection in TerminalTaskPanel)
 
 // [AI-STRICT] TasksPanel is a PURE presentational component. DO NOT add store selectors here.
-// [AI-STRICT] Task status transitions are managed by agentStore.updateTask(). This component only displays.
+// [AI-STRICT] Task status transitions are managed by agentStore.upsertTask(). This component only displays.
 
 
 import { AlertTriangle, CheckCircle2, Circle, Loader2, ChevronDown, ChevronRight, RotateCw } from 'lucide-react';

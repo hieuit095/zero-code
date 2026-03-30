@@ -1,0 +1,61 @@
+# Test & CI artifacts (HUGE — exclude immediately)
+e2e/
+output/
+simulation/
+docs/
+.workspaces/
+
+# Workspace sandboxes (dynamic at runtime, never needed in image)
+backend/workspaces/
+
+# Node Dependencies
+node_modules/
+.npm/
+npm-debug.log
+yarn-error.log
+package-lock.json
+
+# Git History
+.git/
+.gitattributes
+.gitignore
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Environment Variables & OPSEC
+.env
+.env.*
+.env.staging
+.env.production
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+
+# Temp files
+*.log
+*.tmp
+*.temp
+ruff_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large media (if any)
+*.mp4
+*.mov
+*.zip
+*.tar.gz

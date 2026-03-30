@@ -338,12 +338,18 @@ class TaskDelegator:
                         f"URGENT: Tech Lead intervention. Your previous "
                         f"{attempt} attempts FAILED QA verification.\n\n"
                         f"The Tech Lead has analyzed the failures and "
-                        f"provided an architectural fix. Read "
-                        f"/workspace/leader_guidance.md and apply the "
-                        f"EXACT steps described.\n\n"
-                        f"--- LEADER GUIDANCE ---\n"
-                        f"{mentor_guidance}\n"
-                        f"--- END GUIDANCE ---\n\n"
+                        f"provided an architectural fix plan. "
+                        f"Read /workspace/leader_guidance.md and apply the "
+                        f"EXACT steps in the <action_plan> section.\n\n"
+                        # ATLAS PR-CoT Secure Boundary: the guidance is written to
+                        # leader_guidance.md as structured XML-tagged sections.
+                        # Dev receives it as sealed instructions, NOT as raw concatenated
+                        # text that could contain injected prompts.
+                        f"=== TECH LEAD FIX INSTRUCTIONS ===\n"
+                        f"FILE: /workspace/leader_guidance.md\n"
+                        f"Read that file carefully. Apply the steps under "
+                        f"<action_plan>. Do not deviate from the <constraints>.\n"
+                        f"=== END INSTRUCTIONS ===\n\n"
                         f"Original task:\n{self._goal}"
                     )
 
@@ -597,7 +603,9 @@ class TaskDelegator:
                 "critique_report.md not found in sandbox — skipping fs:update",
             )
         except Exception:
-            logger.warning(
+            # P0-D FIX: Internal errors in artifact emission should log at ERROR,
+            # not WARNING, to ensure they are surfaced in monitoring/alerting.
+            logger.error(
                 "Failed to emit critique artifact for run %s", self._run_id,
                 exc_info=True,
             )
@@ -661,22 +669,44 @@ class TaskDelegator:
         guidance = mentor_result.raw_output or mentor_result.summary or ""
 
         # ── Persist guidance to workspace via OpenHands SDK ─────────
-        # AUDIT REMEDIATION: Uses OpenHandsClient.get_runtime().write_file()
-        # instead of host-side Path.write_text().
+        # AUDIT FIX: Added missing await. write_file() is async —
+        # without await the coroutine was silently discarded and the
+        # file was never written, breaking mentorship mode entirely.
+        # P0-E FIX: If the guidance file cannot be written, the Dev agent cannot
+        # follow the mentor's fix plan — this is a SYSTEM failure, not a Dev failure.
+        # Raise SystemError so the run halts and the error is attributed to infrastructure,
+        # not to the Dev agent.
         try:
             from ..services.openhands_client import get_openhands_client
             client = get_openhands_client()
             runtime = client.get_runtime(self._workspace_id)
-            runtime.write_file("/workspace/leader_guidance.md", guidance)
+            await asyncio.wait_for(
+                runtime.write_file("/workspace/leader_guidance.md", guidance),
+                timeout=30.0,
+            )
             logger.info(
                 "Wrote leader_guidance.md (%d bytes) via SDK for run %s",
                 len(guidance), self._run_id,
             )
-        except Exception:
-            logger.warning(
-                "Failed to write leader_guidance.md for run %s",
-                self._run_id, exc_info=True,
+        except asyncio.TimeoutError as e:
+            logger.error(
+                "Timeout writing leader_guidance.md for run %s — sandbox unresponsive: %s",
+                self._run_id, e,
             )
+            raise SystemError(
+                f"Leader guidance write failed (timeout) for run {self._run_id}: "
+                f"sandbox unresponsive. Halting run to prevent Dev agent from being "
+                f"blamed for missing instructions."
+            ) from e
+        except Exception as e:
+            logger.error(
+                "Failed to write leader_guidance.md for run %s: %s",
+                self._run_id, e, exc_info=True,
+            )
+            raise SystemError(
+                f"Leader guidance write failed for run {self._run_id}: {e}. "
+                f"Halting run to prevent Dev agent from being blamed for missing instructions."
+            ) from e
 
         # ── Emit fs:update so frontend displays the artifact ─────────
         await self._emit_workspace_artifact(
@@ -816,8 +846,16 @@ class RunManager:
         for row in key_rows:
             try:
                 decrypted = decrypt_key(row.encrypted_key)
-            except Exception:
-                decrypted = ""
+            except Exception as decrypt_err:
+                # P0-D FIX: Silent `decrypted = ""` was data corruption.
+                # Log CRITICAL and re-raise so the caller knows the key is unreadable.
+                logger.critical(
+                    "Decryption failed for provider %s (key_id=%s): %s",
+                    row.provider, row.id, decrypt_err, exc_info=True,
+                )
+                raise ValueError(
+                    f"Decryption failed for provider {row.provider} (key_id={row.id})"
+                ) from decrypt_err
             provider_keys[row.provider] = (decrypted, row.base_url)
 
         # Use routing config or defaults

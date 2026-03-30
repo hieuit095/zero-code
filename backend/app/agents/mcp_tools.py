@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 _SDK_AVAILABLE = False
 
+# P1-D FIX: Per-workspace MCP tool call counter for rate limiting.
+# Tracks calls per workspace_id. Resets when a new run uses a fresh workspace.
+# Limit: 15 MCP tool calls per workspace per planning loop.
+_MCP_CALL_COUNTER: dict[str, int] = {}
+_MCP_RATE_LIMIT = 15
+
 try:
     from openhands.tools.terminal import TerminalAction  # noqa: F401
 
@@ -136,14 +142,32 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
         try:
             workspace_id, resolved_workspace_root = _resolve_workspace(ctx)
-            _jail_path(resolved_workspace_root, path)
 
+            # P1-D FIX: Rate limit check — abort if workspace exceeded 15 calls.
+            # Also reset counter for a fresh workspace (new run).
+            _MCP_CALL_COUNTER[workspace_id] = _MCP_CALL_COUNTER.get(workspace_id, 0) + 1
+            if _MCP_CALL_COUNTER[workspace_id] > _MCP_RATE_LIMIT:
+                raise RuntimeError(
+                    f"Rate limit exceeded for MCP tools: {workspace_id} made "
+                    f"{_MCP_CALL_COUNTER[workspace_id]} calls (max={_MCP_RATE_LIMIT}). "
+                    f"Halt to prevent prompt-injection abuse."
+                )
+
+            # P1-D FIX: Audit log before executing.
+            logger.info(
+                "AUDIT: Leader executed workspace_read_file with path=%s workspace_id=%s",
+                path, workspace_id,
+            )
+
+            _jail_path(resolved_workspace_root, path)
             runtime = get_openhands_client().get_runtime(workspace_id)
             return runtime.read_file(path)
         except SandboxUnavailableError as e:
             return f"Error: Sandbox unavailable - {e}"
         except ValueError as e:
             return f"Error: {e}"
+        except RuntimeError:
+            raise  # Rate limit error — re-raise to stop the planning loop
         except Exception as e:
             return f"Error reading file: {e}"
 
@@ -179,9 +203,27 @@ def create_mcp_server(workspace_root: str, role: str) -> FastMCP:
 
         try:
             workspace_id, resolved_workspace_root = _resolve_workspace(ctx)
+
+            # P1-D FIX: Rate limit check — abort if workspace exceeded 15 calls.
+            _MCP_CALL_COUNTER[workspace_id] = _MCP_CALL_COUNTER.get(workspace_id, 0) + 1
+            if _MCP_CALL_COUNTER[workspace_id] > _MCP_RATE_LIMIT:
+                raise RuntimeError(
+                    f"Rate limit exceeded for MCP tools: {workspace_id} made "
+                    f"{_MCP_CALL_COUNTER[workspace_id]} calls (max={_MCP_RATE_LIMIT}). "
+                    f"Halt to prevent prompt-injection abuse."
+                )
+
+            # P1-D FIX: Audit log BEFORE executing.
+            logger.info(
+                "AUDIT: Leader executed workspace_exec with command=%s cwd=%s workspace_id=%s",
+                command, cwd, workspace_id,
+            )
+
             _jail_path(resolved_workspace_root, cwd)
         except ValueError as e:
             return f"CWD jail escape detected: {e}"
+        except RuntimeError:
+            raise  # Rate limit error — re-raise to stop planning loop
 
         parts = cwd.split("/")
         if ".." in parts or cwd == "/" or cwd.startswith("/etc"):

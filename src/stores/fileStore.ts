@@ -18,6 +18,15 @@
 import { create } from 'zustand';
 import type { FileNode, EditorTab } from '../types';
 
+// ── Monaco debounce: coalesce rapid fs:update content bursts ──────────────────
+// AUDIT FIX: Rapid DevAgent writes (multiple fs:update events within milliseconds)
+// would cause Zustand to fire a store update per event, triggering a Monaco re-render
+// per keystroke — overwhelming the editor and risking desync or infinite render loops.
+// This Map debounces per-file: subsequent setFileFromServer calls for the same file
+// cancel the previous pending timer and schedule a new one. Only after the burst
+// stops (≥150ms gap) does a single state update fire, causing one re-render.
+const _pendingServerEdits = new Map<string, ReturnType<typeof setTimeout>>();
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 
 /** Map file extensions to Monaco language IDs */
@@ -120,23 +129,47 @@ export const useFileStore = create<FileState>((set, get) => ({
   // Full tree hydration from fs:tree events
   setFileTree: (tree: FileNode[]) => set({ fileTree: tree }),
 
-  // Hydrate a single file from fs:update events — opens the tab if not already open
+  // Hydrate a single file from fs:update events — opens the tab if not already open.
+  // AUDIT FIX (Monaco Race Condition): Debounce the CONTENT update so that rapid
+  // DevAgent writes (multiple fs:update events in milliseconds) do NOT cause a
+  // Zustand store update per event. Only ONE update fires after the burst stops
+  // (≥150ms gap), preventing Monaco from being overwhelmed by rapid re-renders.
+  // The tab open/modified state is still updated immediately so the file explorer
+  // stays in sync; only the content field is debounced.
   setFileFromServer: (name: string, _path: string, language: string, content: string) => {
+    // Immediately open/modify the tab so the file explorer reflects the update at once
     set((state) => {
       const existingTab = state.openTabs.find((t) => t.id === name);
       const newTabs = existingTab
         ? state.openTabs.map((t) => (t.id === name ? { ...t, modified: true } : t))
         : [...state.openTabs, { id: name, name, modified: true }];
-
-      return {
-        fileContents: {
-          ...state.fileContents,
-          [name]: { content, language },
-        },
-        openTabs: newTabs,
-        activeTabId: name,
-      };
+      return { openTabs: newTabs, activeTabId: name };
     });
+
+    // Cancel any pending debounce for this file — the latest write wins
+    const existingTimer = _pendingServerEdits.get(name);
+    if (existingTimer !== undefined) {
+      clearTimeout(existingTimer);
+    }
+
+    // Schedule the content update; subsequent writes within 150ms cancel the previous timer
+    const timer = setTimeout(() => {
+      _pendingServerEdits.delete(name);
+      set((state) => {
+        // Only apply if no user has since closed the tab
+        if (!(name in state.fileContents) && !state.openTabs.find((t) => t.id === name)) {
+          return state;  // tab was closed — discard stale update
+        }
+        return {
+          fileContents: {
+            ...state.fileContents,
+            [name]: { content, language },
+          },
+        };
+      });
+    }, 150);
+
+    _pendingServerEdits.set(name, timer);
   },
 
   setAIControlMode: (active: boolean, fileName?: string) => {

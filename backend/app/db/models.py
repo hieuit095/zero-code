@@ -129,6 +129,17 @@ def _get_fernet() -> Fernet:
             "API_KEY_SECRET is required to encrypt and decrypt provider keys."
         )
 
+    # Reject known placeholder values that would compromise key confidentiality
+    _PLACEHOLDER_PATTERNS = (
+        "your-", "change-me", "placeholder", "secret", "example",
+    )
+    secret_lower = secret.lower()
+    if any(secret_lower.startswith(p) or p in secret_lower for p in _PLACEHOLDER_PATTERNS):
+        raise ValueError(
+            f"API_KEY_SECRET appears to be a placeholder value ('{secret}'). "
+            "Set a strong, random value in backend/.env."
+        )
+
     derived = hashlib.sha256(secret.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(derived))
 

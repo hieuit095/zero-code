@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from datetime import UTC, datetime
 from typing import Any, AsyncGenerator
@@ -36,6 +37,9 @@ class EventBroker:
 
     def __init__(self) -> None:
         self._redis: aioredis.Redis | None = None
+        self._reconnect_attempts: int = 0
+        self._sub_last_seq: dict[str, int] = {}
+        self._authorized_runs: set[str] = set()
 
     async def connect(self) -> None:
         """Connect to Redis and verify the connection."""
@@ -44,8 +48,8 @@ class EventBroker:
             client = aioredis.from_url(
                 redis_url,
                 decode_responses=True,
-                socket_connect_timeout=1,
-                socket_timeout=10,
+                socket_connect_timeout=5.0,
+                socket_timeout=10.0,
             )
             try:
                 await client.ping()
@@ -68,6 +72,39 @@ class EventBroker:
             await self._redis.aclose()
             self._redis = None
             logger.info("EventBroker Redis connection closed")
+
+    async def reconnect(self) -> bool:
+        """Reconnect to Redis with exponential backoff (up to 5 retries)."""
+        redis_url = get_settings().redis_url
+        for attempt in range(1, 6):
+            try:
+                client = aioredis.from_url(
+                    redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=5.0,
+                    socket_timeout=10.0,
+                )
+                await client.ping()
+                self._redis = client
+                self._reconnect_attempts = 0
+                logger.info("EventBroker reconnected to Redis at %s", redis_url)
+                return True
+            except (ConnectionError, Exception) as exc:
+                logger.warning(
+                    "Redis reconnect attempt %s/5 failed: %s",
+                    attempt,
+                    exc,
+                )
+                if attempt < 5:
+                    await asyncio.sleep(2 ** (attempt - 1))
+        self._redis = None
+        self._reconnect_attempts = 5
+        logger.error("EventBroker could not reconnect to Redis after 5 attempts")
+        return False
+
+    async def authorize_run(self, run_id: str) -> None:
+        """Authorize a run_id to subscribe to events."""
+        self._authorized_runs.add(run_id)
 
     @property
     def redis(self) -> aioredis.Redis:
@@ -107,6 +144,12 @@ class EventBroker:
         This preserves DB-before-emit ordering and keeps event sequence state in
         PostgreSQL instead of process memory.
         """
+        """
+        Persist the event before publishing it to Redis.
+
+        This preserves DB-before-emit ordering and keeps event sequence state in
+        PostgreSQL instead of process memory.
+        """
         max_attempts = 5
         event: dict[str, Any] | None = None
 
@@ -124,6 +167,49 @@ class EventBroker:
                             timestamp=event["timestamp"],
                             data=event["data"],
                             commit=False,
+                        )
+                    # session.begin() exits here → transaction COMMITS
+                    # Redis publish STRICTLY AFTER confirmed DB commit
+                    # P1-B FIX: redis_published declared OUTSIDE the try at the same 22-space
+                    # indent as the `if not redis_published:` check so it is always in scope.
+                    if self.has_redis:
+                        redis_published = False  # noqa: F841  # set inside try below
+                        try:
+                            await asyncio.wait_for(
+                                self.redis.publish(
+                                    self._channel(run_id), json.dumps(event)
+                                ),
+                                timeout=5.0,
+                            )
+                            redis_published = True
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                "Redis publish TIMEOUT (5s) for event seq=%s run=%s "
+                                "— DB committed, flagging for DB polling recovery",
+                                event["seq"], run_id,
+                            )
+                        except Exception as redis_exc:
+                            # P1-B FIX: Log at CRITICAL level so it's immediately visible,
+                            # but do NOT re-raise — DB is SSOT, orchestrator must not crash.
+                            logger.critical(
+                                "Redis publish failed, but event is safe in Postgres SSOT: %s",
+                                redis_exc,
+                            )
+                if not redis_published:
+                    # P1-D FIX: Recovery marker moved OUTSIDE session.begin() block so it
+                    # fires regardless of exceptions inside the transaction.
+                    try:
+                        recovery_key = f"zero:events:{run_id}:{event['seq']}:redis_failed"
+                        await asyncio.wait_for(
+                            self.redis.setex(recovery_key, 300, "1"),
+                            timeout=5.0,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Recovery marker setex failed for seq=%s run=%s: %s",
+                            event["seq"],
+                            run_id,
+                            e,
                         )
                 break
             except IntegrityError as exc:
@@ -154,19 +240,12 @@ class EventBroker:
         if not self.has_redis:
             return event
 
-        try:
-            await self.redis.publish(self._channel(run_id), json.dumps(event))
-        except Exception:
-            logger.exception(
-                "Failed to publish persisted event seq=%s to Redis for run %s",
-                event["seq"],
-                run_id,
-            )
-
         return event
 
     async def subscribe(self, run_id: str) -> AsyncGenerator[dict[str, Any], None]:
         """Subscribe to Redis channel for a run and yield JSON-decoded events."""
+        if run_id not in self._authorized_runs:
+            raise PermissionError(f"Unauthorized run_id: {run_id}")
         if not self.has_redis:
             async for event in self._subscribe_via_db(run_id):
                 yield event
@@ -176,6 +255,30 @@ class EventBroker:
         channel = self._channel(run_id)
 
         await pubsub.subscribe(channel)
+        logger.info("Sent SUBSCRIBE for Redis channel %s", channel)
+
+        # AUDIT FIX: Drain the subscription confirmation from Redis before
+        # starting to listen. Redis sends a "* 1\r\n$9\r\nsubscribe\r\n..." confirmation
+        # on the socket. Without draining it, the first get_message() call in the
+        # listen loop would return this confirmation as the first "event", causing
+        # the frontend to receive a malformed frame. Drain with a small timeout
+        # to avoid blocking indefinitely if the server doesn't confirm.
+        try:
+            confirm_msg = await asyncio.wait_for(
+                pubsub.get_message(), timeout=5.0
+            )
+            logger.debug(
+                "Redis subscription confirmed for channel %s: %s",
+                channel,
+                confirm_msg,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Redis did not confirm subscription to %s within 5s — "
+                "proceeding anyway; early events may be missed",
+                channel,
+            )
+
         logger.info("Subscribed to Redis channel %s", channel)
 
         try:
@@ -191,6 +294,8 @@ class EventBroker:
 
                 yield event
 
+                if (event.get("seq", 0) > self._sub_last_seq.get(run_id, 0)):
+                    self._sub_last_seq[run_id] = event["seq"]
                 if event.get("type") in ("run:complete", "run:error"):
                     break
         finally:
@@ -270,7 +375,7 @@ class EventBroker:
 
     async def _subscribe_via_db(self, run_id: str) -> AsyncGenerator[dict[str, Any], None]:
         """Fallback event stream when Redis is unavailable."""
-        last_seq = 0
+        last_seq = self._sub_last_seq.get(run_id, 0)
         terminal_types = {"run:complete", "run:error"}
         terminal_statuses = {"completed", "failed", "cancelled"}
 
@@ -281,6 +386,7 @@ class EventBroker:
 
             for row in rows:
                 last_seq = row.seq
+                self._sub_last_seq[run_id] = row.seq
                 event = {
                     "type": row.type,
                     "runId": run_id,
@@ -302,10 +408,14 @@ class EventBroker:
 
 
 _broker: EventBroker | None = None
+_broker_lock = threading.Lock()
 
 
 def get_event_broker() -> EventBroker:
+    """Return the singleton EventBroker (created lazily). Thread-safe."""
     global _broker
     if _broker is None:
-        _broker = EventBroker()
+        with _broker_lock:
+            if _broker is None:
+                _broker = EventBroker()
     return _broker

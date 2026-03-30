@@ -35,7 +35,10 @@ interface RecentRun {
     updatedAt: string | null;
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL?.trim() || '';
+const _envVal = import.meta.env.VITE_API_BASE_URL?.trim();
+const API_BASE = _envVal
+  ? _envVal
+  : (console.warn('[AdminDashboard] VITE_API_BASE_URL is not set — falling back to window.location.origin + \'/api\''), window.location.origin + '/api');
 
 function formatDuration(ms: number): string {
     if (ms < 1000) return `${ms}ms`;

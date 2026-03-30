@@ -34,6 +34,8 @@ from .llm_utils import build_sdk_llm, extract_last_assistant_text
 
 logger = logging.getLogger(__name__)
 
+from uuid import uuid4  # Ralph-loop temp file naming
+
 _RUNTIME_DIR_NAMES = {
     ".git",
     ".pytest_cache",
@@ -247,12 +249,17 @@ class DevAgent:
             )
 
             conversation.send_message(user_message)
+            # P0-C FIX: Record message count before conversation.run().
+            # If LLM produces no new messages (empty response), return immediately.
+            prev_msg_count = len(llm_messages)
             try:
                 # HANG FIX: conversation.run() is synchronous and blocks the
                 # asyncio event loop for the entire LLM execution (minutes for
                 # complex tasks). Offload to a thread so Redis publishes,
                 # WebSocket heartbeats, and other coroutines keep running.
                 await asyncio.to_thread(conversation.run)
+            except (asyncio.CancelledError, SystemError, MemoryError, KeyboardInterrupt):
+                raise
             except Exception as exc:
                 conversation_error = exc
                 logger.warning(
@@ -262,6 +269,20 @@ class DevAgent:
                     task_id,
                     attempt,
                     exc_info=True,
+                )
+
+            # P0-C FIX: If LLM produced no new messages, return Ralph_retry_empty immediately.
+            if len(llm_messages) == prev_msg_count:
+                logger.error(
+                    "Ralph initial conversation produced ZERO new LLM messages for run=%s task=%s "
+                    "— aborting (LLM returned nothing)",
+                    run_id, task_id,
+                )
+                return DevAgentResult(
+                    status="Ralph_retry_empty",
+                    summary="Ralph initial run failed: LLM returned no output (content filter or crash)",
+                    error="RALPH_NO_OUTPUT: LLM produced no new messages on initial run",
+                    files_changed=[],
                 )
 
             # ── Extract structured result from LLM output ──────────────
@@ -278,6 +299,96 @@ class DevAgent:
                 if recovered is not None:
                     return recovered
                 raise conversation_error
+
+            # ── Ralph-loop: syntax check before QA handoff ─────────────────────
+            # ATLAS Anti-Silent-Failure: if py_compile finds SyntaxErrors,
+            # re-inject them into Dev's context and retry (up to 2 times).
+            Ralph_MAX_RETRIES = 2
+            Ralph_files_changed: list[str] = []
+
+            for Ralph_attempt in range(Ralph_MAX_RETRIES + 1):
+                Ralph_syntax_error = await self._ralph_check_changed_files(
+                    workspace_root=workspace_root,
+                    files_changed=None,
+                    before_snapshot=before_snapshot,
+                    after_snapshot=after_snapshot,
+                )
+                if Ralph_syntax_error is None:
+                    break  # Ralph is satisfied — proceed to QA
+
+                if Ralph_attempt < Ralph_MAX_RETRIES:
+                    # P0-A FIX: If conversation.run() raises ANY exception,
+                    # Ralph must NOT fall through to parse_result() with potentially
+                    # corrupted/empty llm_messages. Re-raise explicitly so the
+                    # run is marked as failed, not as "Ralph succeeded but found errors."
+                    logger.info(
+                        "Ralph [%d/%d] syntax error for run=%s task=%s — "
+                        "re-injecting into Dev context for self-repair",
+                        Ralph_attempt + 1, Ralph_MAX_RETRIES, run_id, task_id,
+                    )
+                    Ralph_retry_msg = (
+                        f"[RALPH SYNTAX CHECK FAILED — Attempt {Ralph_attempt + 1}/{Ralph_MAX_RETRIES}]\n"
+                        f"Your submitted code has the following syntax errors:\n"
+                        f"{Ralph_syntax_error}\n\n"
+                        f"IMPORTANT: Fix all the errors above. Then output the JSON result "
+                        f"with corrected files_changed.\n"
+                        f"Do not explain the errors — just fix them and re-output the JSON."
+                    )
+                    conversation.send_message(Ralph_retry_msg)
+                    pre_retry_msg_count = len(llm_messages)
+                    try:
+                        await asyncio.to_thread(conversation.run)
+                    except Exception as Ralph_conv_exc:
+                        # P0-A: Re-raise so the run is explicitly marked as failed.
+                        # Do NOT fall through to parse_result() with empty/partial output.
+                        logger.error(
+                            "Ralph retry conversation CRASHED for run=%s task=%s attempt=%s — "
+                            "re-raising as DevAgentError: %s",
+                            run_id, task_id, Ralph_attempt + 1, Ralph_conv_exc,
+                            exc_info=True,
+                        )
+                        return DevAgentResult(
+                            status="error",
+                            summary=f"Ralph retry crashed: {Ralph_conv_exc}",
+                            error=f"RALPH_CONVERSATION_ERROR: {Ralph_conv_exc}",
+                            files_changed=[],
+                        )
+
+                    # P0-C FIX: Validate that the LLM actually produced new output after the retry.
+                    # If llm_messages didn't grow, the LLM returned nothing — treat as Ralph failure.
+                    post_retry_msg_count = len(llm_messages)
+                    if post_retry_msg_count <= pre_retry_msg_count:
+                        logger.error(
+                            "Ralph retry produced ZERO new LLM messages for run=%s task=%s "
+                            "attempt=%d — aborting (LLM returned nothing)",
+                            run_id, task_id, Ralph_attempt + 1,
+                        )
+                        return DevAgentResult(
+                            status="Ralph_retry_empty",
+                            summary="Ralph retry failed: LLM returned no output (content filter or crash)",
+                            error=f"RALPH_NO_OUTPUT: LLM produced no new messages on attempt {Ralph_attempt + 1}",
+                            files_changed=[],
+                        )
+
+                    raw_output = extract_last_assistant_text(llm_messages)
+                    after_snapshot = self._snapshot_workspace(workspace_root)
+                    continue
+
+                # Ralph exhausted — all retries failed
+                logger.error(
+                    "Ralph FAILED after %d self-repair attempts for run=%s task=%s "
+                    "— aborting Dev handoff to QA",
+                    Ralph_MAX_RETRIES, run_id, task_id,
+                )
+                return DevAgentResult(
+                    status="ralph_failed",
+                    summary=(
+                        f"Ralph-loop failed after {Ralph_MAX_RETRIES} self-repair attempts. "
+                        f"Syntax errors must be resolved before QA."
+                    ),
+                    error=f"RALPH_SYNTAX_ERROR: {Ralph_syntax_error}",
+                    files_changed=[],
+                )
 
             return self._parse_result(
                 raw_output,
@@ -417,6 +528,134 @@ class DevAgent:
             if before_snapshot.get(path) != metadata
         )
         return self._normalize_changed_files(from_output + from_snapshot)
+
+    # ── Ralph-loop: fast local syntax/sanity check before QA ─────────────────
+    # ATLAS Ralph-loop: runs py_compile on every changed Python file inside
+    # the sandbox. On SyntaxError, returns the error string so the orchestrator
+    # can retry Dev with the error injected. On success, returns None.
+    # P0-B FIX: System errors (TimeoutError, PermissionError, OSError, FileNotFoundError)
+    # log ERROR and return DevAgentResult failure immediately. Only SyntaxError triggers retry.
+    async def _ralph_check_changed_files(
+        self,
+        workspace_root: Path,
+        files_changed: list[str] | None,
+        before_snapshot: dict[str, tuple[int, int]],
+        after_snapshot: dict[str, tuple[int, int]],
+    ) -> DevAgentResult | None:
+        """
+        Run Ralph syntax check on all changed Python files.
+
+        Args:
+            workspace_root: Absolute path to the workspace root.
+            files_changed: Explicit list of file paths, or None to infer from snapshot.
+            before_snapshot: Workspace snapshot before the Dev run.
+            after_snapshot:  Workspace snapshot after  the Dev run.
+
+        Returns:
+            None if all files pass py_compile.
+            DevAgentResult with status='ralph_failed' if system errors occur (fatal, no retry).
+            str error description if SyntaxError (triggers retry via caller).
+        """
+        if files_changed is None:
+            files_changed = self._infer_changed_files(
+                "", before_snapshot=before_snapshot, after_snapshot=after_snapshot
+            )
+        python_files = [f for f in files_changed if f.endswith(".py")]
+        if not python_files:
+            return None
+
+        runtime = None
+        try:
+            from ..services.openhands_client import get_openhands_client
+            client = get_openhands_client()
+            runtime = client.get_runtime(str(workspace_root))
+        except Exception as Ralph_runtime_err:
+            logger.warning(
+                "Ralph cannot get sandbox runtime for %s — skipping syntax check: %s",
+                workspace_root, Ralph_runtime_err,
+            )
+            return None
+
+        Ralph_errors: list[str] = []
+        for py_file in python_files:
+            # Strip /workspace prefix for sandbox-relative path
+            rel_path = py_file
+            for prefix in ("/workspace/", "/workspace"):
+                if rel_path.startswith(prefix):
+                    rel_path = rel_path[len(prefix):]
+                    break
+
+            # P0-B FIX: Catch specific system errors. Log at ERROR and return
+            # DevAgentResult immediately — these are fatal, not retryable.
+            try:
+                exec_result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        runtime.execute_command,
+                        command=f"python -m py_compile /workspace/{rel_path}",
+                        cwd="/workspace",
+                        timeout=10.0,
+                    ),
+                    timeout=15.0,
+                )
+                stderr = (exec_result.get("error") or "").strip()
+                if stderr:
+                    Ralph_errors.append(f"  File /workspace/{rel_path}:\n    {stderr.splitlines()[0]}")
+            except asyncio.TimeoutError:
+                # P0-B: Timeout is a system failure — sandbox may be hung.
+                # Log at ERROR and return immediately (no retry).
+                logger.error(
+                    "Ralph timeout compiling %s — sandbox hung; returning DevAgentResult failure",
+                    py_file,
+                )
+                return DevAgentResult(
+                    status="ralph_failed",
+                    summary=f"Ralph timeout: sandbox hung while compiling {py_file}",
+                    error=f"RALPH_TIMEOUT: /workspace/{rel_path} timed out after 15s",
+                    files_changed=[],
+                )
+            except PermissionError as e:
+                logger.error(
+                    "Ralph permission denied reading %s — returning DevAgentResult failure",
+                    py_file,
+                )
+                return DevAgentResult(
+                    status="ralph_failed",
+                    summary=f"Ralph permission denied: {e}",
+                    error=f"RALPH_PERMISSION_ERROR: /workspace/{rel_path}: {e}",
+                    files_changed=[],
+                )
+            except OSError as e:
+                logger.error(
+                    "Ralph OS error checking %s — returning DevAgentResult failure",
+                    py_file,
+                )
+                return DevAgentResult(
+                    status="ralph_failed",
+                    summary=f"Ralph OS error: {e}",
+                    error=f"RALPH_OS_ERROR: /workspace/{rel_path}: {e}",
+                    files_changed=[],
+                )
+            except FileNotFoundError as e:
+                logger.error(
+                    "Ralph FileNotFoundError checking %s — returning DevAgentResult failure",
+                    py_file,
+                )
+                return DevAgentResult(
+                    status="ralph_failed",
+                    summary=f"Ralph file not found: {e}",
+                    error=f"RALPH_FILE_NOT_FOUND: /workspace/{rel_path}: {e}",
+                    files_changed=[],
+                )
+
+        if not Ralph_errors:
+            return None
+
+        # Only SyntaxErrors reach here — these are retryable (caller handles retry loop).
+        return (
+            "Ralph syntax check FAILED — the following Python files have errors:\n"
+            + "\n".join(Ralph_errors)
+            + "\nFix the errors above before proceeding to QA."
+        )
 
     def _summarize_unstructured_output(
         self,

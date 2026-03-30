@@ -29,6 +29,16 @@
  * }
  */
 
+// ── Singleton WebSocket manager ─────────────────────────────────────────────────
+// AUDIT FIX: useAgentConnection().sendMessage was a no-op stub that silently
+// discarded all outgoing user events. This singleton allows any hook or component
+// to send via the active WebSocket without importing the full useRunConnection hook.
+// Registered by useRunConnection on mount; consumed by useAgentConnection sendMessage.
+type SendFn = (event: import('../types/runEvents').RunSocketClientEvent) => boolean;
+const _wsSendManager: { send: SendFn | null } = { send: null };
+export function _registerWsSend(send: SendFn) { _wsSendManager.send = send; }
+export function _getWsSend(): SendFn | null { return _wsSendManager.send; }
+
 import { useEffect, useRef, useState } from 'react';
 import { useAgentStore } from '../stores/agentStore';
 import { useFileStore } from '../stores/fileStore';
@@ -147,7 +157,7 @@ async function createRunRequest(options: StartRunOptions) {
 export function useRunConnection(): UseRunConnectionReturn {
   const addMessageFromServer = useAgentStore((state) => state.addMessageFromServer);
   const updateAgentStatus = useAgentStore((state) => state.updateAgentStatus);
-  const updateTask = useAgentStore((state) => state.updateTask);
+  const upsertTask = useAgentStore((state) => state.upsertTask);
   const setTasks = useAgentStore((state) => state.setTasks);
   const setRunStatus = useAgentStore((state) => state.setRunStatus);
   const setRunProgress = useAgentStore((state) => state.setRunProgress);
@@ -325,7 +335,7 @@ export function useRunConnection(): UseRunConnectionReturn {
 
       case 'agent:message:delta': {
         // Phase 1: Append real LLM token delta to the streaming buffer
-        appendStreamingDelta(event.data.messageId, event.data.delta);
+        appendStreamingDelta(event.data.messageId, event.data.delta, event.data.seq);
         break;
       }
 
@@ -350,8 +360,8 @@ export function useRunConnection(): UseRunConnectionReturn {
       }
 
       case 'task:update': {
-        // @ai-integration-point: task:update -> agentStore.updateTask - This is the minimal live-task path until the store supports full snapshot hydration.
-        updateTask(event.data.taskId, event.data.status);
+        // @ai-integration-point: task:update -> agentStore.upsertTask - This is the minimal live-task path until the store supports full snapshot hydration.
+        upsertTask(event.data.taskId, event.data.status);
         break;
       }
 
@@ -730,14 +740,14 @@ export function useRunConnection(): UseRunConnectionReturn {
     });
   };
 
+  // AUDIT FIX: Register the send function into the singleton manager so that
+  // useAgentConnection().sendMessage can delegate to the active WebSocket.
   useEffect(() => {
+    _registerWsSend(sendMessage);
     return () => {
-      shouldReconnectRef.current = false;
-      clearReconnectTimer();
-      socketRef.current?.close();
-      socketRef.current = null;
+      _registerWsSend(() => false);  // deregister on unmount
     };
-  }, []);
+  }, [sendMessage]);
 
   return {
     ...state,

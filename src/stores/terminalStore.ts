@@ -58,21 +58,25 @@ function _startFlushTimer(set: (fn: (state: TerminalState) => Partial<TerminalSt
   if (_flushTimer !== null) return;
   _setRef = set;
 
-  _flushTimer = setInterval(() => {
-    if (_buffer.length === 0) return;
+  try {
+    _flushTimer = setInterval(() => {
+      if (_buffer.length === 0) return;
 
-    const batch = _buffer;
-    _buffer = [];
+      const batch = _buffer;
+      _buffer = [];
 
-    set((state) => {
-      const merged = [...state.logLines, ...batch];
-      // Trim from the front if we exceed max
-      const trimmed = merged.length > MAX_LOG_LINES
-        ? merged.slice(merged.length - MAX_LOG_LINES)
-        : merged;
-      return { logLines: trimmed };
-    });
-  }, FLUSH_INTERVAL_MS);
+      set((state) => {
+        const merged = [...state.logLines, ...batch];
+        // Trim from the front if we exceed max
+        const trimmed = merged.length > MAX_LOG_LINES
+          ? merged.slice(merged.length - MAX_LOG_LINES)
+          : merged;
+        return { logLines: trimmed };
+      });
+    }, FLUSH_INTERVAL_MS);
+  } catch {
+    // Interval reference is still registered for cleanup even if it throws
+  }
 }
 
 function _stopFlushTimer() {
@@ -130,6 +134,7 @@ export const useTerminalStore = create<TerminalState>((set) => {
     },
 
     clearTerminal: () => {
+      _stopFlushTimer();
       _buffer = [];
       set({ logLines: [] });
     },

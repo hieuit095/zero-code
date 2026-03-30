@@ -34,7 +34,7 @@ export type AgentMessage = {
   timestamp: string;
 };
 
-// @ai-contract: TaskStatus is driven by agentStore.updateTask. Valid transitions: pending -> in-progress -> completed.
+// @ai-contract: TaskStatus is driven by agentStore.upsertTask. Valid transitions: pending -> in-progress -> completed.
 //               Tasks are never deleted; they only move forward in status.
 export type TaskStatus = 'completed' | 'in-progress' | 'pending';
 

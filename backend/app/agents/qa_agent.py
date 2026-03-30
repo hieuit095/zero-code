@@ -683,6 +683,9 @@ class QaAgent:
                             attempt,
                         )
                         return assisted
+                # P1-G FIX: re-raise infrastructure errors as P0, not hidden QA failures
+                except (asyncio.CancelledError, SystemError, MemoryError, KeyboardInterrupt):
+                    raise
                 except Exception:
                     logger.warning(
                         "Assisted QA recovery failed after exception for run=%s task=%s attempt=%s",
@@ -921,11 +924,18 @@ class QaAgent:
 
         expected_files = self._extract_expected_workspace_files(context)
         file_payloads: list[tuple[str, str]] = []
+        skipped_files: list[str] = []
         for path in dict.fromkeys(changed_files + expected_files):
             try:
                 content = await asyncio.to_thread(runtime.read_file, path)
-            except Exception:
-                logger.warning("Assisted QA could not read %s", path, exc_info=True)
+            except Exception as e:
+                # P1-H FIX: track skipped files and log as ERROR, not just warning
+                logger.error(
+                    "QA could not read %s: %s — appending SKIPPED notice to report",
+                    path,
+                    e,
+                )
+                skipped_files.append(path)
                 continue
             file_payloads.append((path, content[:12000]))
 
@@ -951,6 +961,40 @@ class QaAgent:
                 )
             )
 
+        # ── Anti-Silent-Failure: Zero-Test Detection ────────────────────────────
+        # ATLAS Anti-Silent-Failure: a pytest run that collects 0 tests is a
+        # FAILURE, not a pass. The test suite is either missing or broken.
+        # Force robustness=0 and requirements=0 for any pytest run that found
+        # zero tests. This prevents silent pass when the dev wrote no tests.
+        for result in command_results:
+            if "pytest" not in result.command:
+                continue
+            stdout_lower = result.stdout.lower()
+            stderr_lower = result.stderr.lower()
+            combined = stdout_lower + "\n" + stderr_lower
+            zero_test_patterns = [
+                "collected 0 items",
+                "collected 0 tests",
+                "no tests ran",
+                "no tests were collected",
+                "0 passed",
+                "0 passed, 0 failed",  # pytest -v shows "0 passed" on empty suite
+            ]
+            if any(pat in combined for pat in zero_test_patterns):
+                logger.warning(
+                    "ANTI-SILENT-FAILURE: pytest collected ZERO tests for run=%s task=%s. "
+                    "Command='%s'. Forcing robustness=0 and requirements=0.",
+                    run_id, task_id, result.command,
+                )
+                # Mark as failing command so QA model sees the zero-test evidence
+                result.exit_code = 1
+                if "ZERO_TESTS" not in result.stdout:
+                    result.stdout = (
+                        f"[ATLAS ANTI-SILENT-FAILURE: Zero tests collected]\n"
+                        f"{result.stdout}"
+                    )
+        # ───────────────────────────────────────────────────────────────────────
+
         report_text = self._generate_assisted_report(
             llm=llm,
             task_id=task_id,
@@ -960,6 +1004,15 @@ class QaAgent:
             command_results=command_results,
             context=context,
         )
+        # P1-H FIX: append skipped-files notice to report if any files could not be read
+        if skipped_files:
+            report_text += (
+                f"\n\n[QA WARNING: {len(skipped_files)} file(s) could not be read "
+                f"and were excluded from verification: {', '.join(skipped_files)}]"
+            )
+        # P1-I FIX: distinguish None (LLM failure) from empty string (no content)
+        if report_text is None:
+            raise RuntimeError(f"QA LLM completion returned None for task {task_id}")
         if not report_text:
             return None
 
@@ -1189,8 +1242,10 @@ class QaAgent:
 
         try:
             response = llm.completion(messages=messages, tools=[])
-        except Exception:
-            logger.warning("Assisted QA LLM completion failed", exc_info=True)
-            return ""
+            return extract_message_text(response.message)
+        except Exception as e:
+            # P1-I FIX: return None so caller can distinguish failure from empty output
+            logger.error("QA LLM completion failed for task %s: %s", task_id, e, exc_info=True)
+            return None
 
         return extract_message_text(response.message)

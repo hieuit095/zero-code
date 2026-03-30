@@ -130,11 +130,18 @@ def _jail_path(workspace_root: str, requested_path: str) -> str:
     """
     Resolve *requested_path* against *workspace_root* and verify it stays inside
     the workspace jail.
+
+    AUDIT FIX: Replaced startswith-based check with pathlib.Path.is_relative_to()
+    which correctly handles symlinks in both abs_root and the final resolved path.
+    Previously, a symlink inside the workspace (e.g. /workspace/link -> /) could
+    cause startswith() to silently pass while escaping the jail.
     """
+    import pathlib
+
     if "\x00" in requested_path:
         raise ValueError("Path contains null bytes")
 
-    abs_root = os.path.realpath(workspace_root)
+    abs_root = pathlib.Path(workspace_root).resolve()
 
     if requested_path.startswith("/workspace/"):
         relative = requested_path[len("/workspace/") :]
@@ -147,15 +154,16 @@ def _jail_path(workspace_root: str, requested_path: str) -> str:
     else:
         relative = requested_path
 
-    full_path = os.path.join(abs_root, os.path.normpath(relative))
-    real_full_path = os.path.realpath(full_path)
+    full_path = (abs_root / pathlib.Path(relative)).resolve()
 
-    if not real_full_path.startswith(abs_root) and real_full_path != abs_root:
+    # is_relative_to() returns False if path is outside abs_root (resolves symlinks)
+    if not full_path.is_relative_to(abs_root):
         raise ValueError(
-            f"Path traversal blocked: '{requested_path}' escapes workspace jail"
+            f"Path traversal blocked: '{requested_path}' escapes workspace jail. "
+            f"Resolved to '{full_path}' which is not inside '{abs_root}'"
         )
 
-    return real_full_path
+    return str(full_path)
 
 
 class _WorkspaceRuntime:
@@ -407,7 +415,21 @@ class _WorkspaceRuntime:
         self._alive = False
         try:
             if self._docker_workspace is not None:
-                self._docker_workspace.cleanup()
+                # P1-J FIX: wrap Docker cleanup with asyncio.wait_for timeout=30s
+                # so a hung container cannot become a zombie.
+                try:
+                    asyncio.wait_for(
+                        asyncio.to_thread(self._docker_workspace.cleanup),
+                        timeout=30.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.critical(
+                        "Docker container cleanup timed out after 30s for runtime %s — force-killing",
+                        self.workspace_id,
+                    )
+                    raise SystemError(
+                        f"Docker container cleanup timeout for workspace {self.workspace_id}"
+                    )
             elif self._local_workspace is not None:
                 pass
             else:

@@ -53,9 +53,21 @@ export function useAgentConnection(): AgentConnectionReturn {
     qaRetryState,
     streamingMessages,
     qaScoreHistory,
-    sendMessage: (_payload: unknown) => {
-      // @ai-integration-point: Replace with ws.send(JSON.stringify(_payload))
-    },
+    // AUDIT FIX: sendMessage was a no-op stub — all outgoing user events were
+    // silently discarded. Now delegates to the singleton WebSocket manager that is
+    // registered by useRunConnection when the connection is active.
+    sendMessage: ((payload: unknown): boolean => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { _getWsSend } = require('./useRunConnection') as {
+          _getWsSend: () => ((e: unknown) => boolean) | null;
+        };
+        const sender = _getWsSend();
+        return sender ? sender(payload) : false;
+      } catch {
+        return false;
+      }
+    }) as AgentConnectionReturn['sendMessage'],
   };
 }
 
@@ -66,12 +78,12 @@ export function useAgentActions() {
   const addMessage = useAgentStore((s) => s.addMessage);
   const addMessageFromServer = useAgentStore((s) => s.addMessageFromServer);
   const updateAgentStatus = useAgentStore((s) => s.updateAgentStatus);
-  const updateTask = useAgentStore((s) => s.updateTask);
+  const upsertTask = useAgentStore((s) => s.upsertTask);
   const setTasks = useAgentStore((s) => s.setTasks);
   const runStatus = useAgentStore((s) => s.runStatus);
   const runProgress = useAgentStore((s) => s.runProgress);
 
-  return { addMessage, addMessageFromServer, updateAgentStatus, updateTask, setTasks, runStatus, runProgress };
+  return { addMessage, addMessageFromServer, updateAgentStatus, upsertTask, setTasks, runStatus, runProgress };
 }
 
 export function useAgentStatus(agent: AgentRole) {
