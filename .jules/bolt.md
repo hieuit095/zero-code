@@ -1,0 +1,3 @@
+## 2024-05-18 - Prevent Unnecessary Re-renders with React.memo()
+**Learning:** Found multiple instances where array properties were filtered independently inside a render loop, such as iterating over tasks to count statuses. In an application with rapidly changing properties (like terminal stream logs triggering parent re-renders), child components shouldn't perform complex O(n) filtering synchronously on every render.
+**Action:** Use `React.memo` for components that receive large arrays as props. Use `Array.prototype.reduce` with `useMemo` to coalesce multiple O(n) filters into a single pass and cache the result.
