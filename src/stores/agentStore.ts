@@ -167,7 +167,7 @@ export const useAgentStore = create<AgentState>((set) => ({
         return { tasks: updated };
       } else {
         console.warn(`[agentStore] upsertTask: task ${id} not in array — inserted (possible out-of-order event)`);
-        return { tasks: [...state.tasks, { id, status, label: '', description: '' }] };
+        return { tasks: [...state.tasks, { id, status, label: '', agent: 'dev' }] };
       }
     });
   },

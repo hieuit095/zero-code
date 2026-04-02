@@ -18,6 +18,7 @@
 import { useAgentStore } from '../stores/agentStore';
 import type { StreamingMessage, QaScoreEntry } from '../stores/agentStore';
 import type { AgentMessage, Task, AgentRole, AgentStatuses, ActiveActivities } from '../types';
+import { _getWsSend } from './useRunConnection';
 
 export interface AgentConnectionReturn {
   messages: AgentMessage[];
@@ -58,12 +59,8 @@ export function useAgentConnection(): AgentConnectionReturn {
     // registered by useRunConnection when the connection is active.
     sendMessage: ((payload: unknown): boolean => {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { _getWsSend } = require('./useRunConnection') as {
-          _getWsSend: () => ((e: unknown) => boolean) | null;
-        };
         const sender = _getWsSend();
-        return sender ? sender(payload) : false;
+        return sender ? sender(payload as import('../types/runEvents').RunSocketClientEvent) : false;
       } catch {
         return false;
       }

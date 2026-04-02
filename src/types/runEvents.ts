@@ -175,6 +175,7 @@ export interface AgentMessageStartData {
 export interface AgentMessageDeltaData {
   messageId: string;
   delta: string;
+  seq: number;
 }
 
 /**

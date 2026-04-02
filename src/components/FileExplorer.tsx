@@ -209,7 +209,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={(id) => fetchAndOpenFile(id, workspaceId)}
             />
           ))
         )}

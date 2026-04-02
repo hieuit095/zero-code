@@ -39,7 +39,7 @@ const _wsSendManager: { send: SendFn | null } = { send: null };
 export function _registerWsSend(send: SendFn) { _wsSendManager.send = send; }
 export function _getWsSend(): SendFn | null { return _wsSendManager.send; }
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAgentStore } from '../stores/agentStore';
 import { useFileStore } from '../stores/fileStore';
 import { useTerminalStore } from '../stores/terminalStore';
@@ -238,7 +238,7 @@ export function useRunConnection(): UseRunConnectionReturn {
     }));
   };
 
-  const sendMessage = (event: RunSocketClientEvent) => {
+  const sendMessage = useCallback((event: RunSocketClientEvent) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
@@ -246,7 +246,7 @@ export function useRunConnection(): UseRunConnectionReturn {
 
     socket.send(JSON.stringify(event));
     return true;
-  };
+  }, []);
 
   const dispatchServerEvent = (event: RunSocketServerEvent) => {
     // AUDIT FIX: Keep the mutable ref in sync for reconnect hydration.

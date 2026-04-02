@@ -15,7 +15,7 @@
 
 
 import { AlertTriangle, CheckCircle2, Circle, Loader2, ChevronDown, ChevronRight, RotateCw } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useMemo, memo } from 'react';
 import type { Task, AgentRole } from '../types';
 
 const agentBadge: Record<AgentRole, string> = {
@@ -84,7 +84,7 @@ interface TasksPanelProps {
   qaRetryState?: QaRetryState | null;
 }
 
-export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
+export const TasksPanel = memo(function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const toggle = (id: string) => {
@@ -96,13 +96,17 @@ export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
     });
   };
 
-  const statusCounts = {
-    completed: tasks.filter((t) => t.status === 'completed').length,
-    'in-progress': tasks.filter((t) => t.status === 'in-progress').length,
-    pending: tasks.filter((t) => t.status === 'pending').length,
-  };
+  const statusCounts = useMemo(() => {
+    return tasks.reduce(
+      (acc, task) => {
+        acc[task.status]++;
+        return acc;
+      },
+      { completed: 0, 'in-progress': 0, pending: 0 }
+    );
+  }, [tasks]);
 
-  const failingSet = new Set(qaRetryState?.failingDimensions ?? []);
+  const failingSet = useMemo(() => new Set(qaRetryState?.failingDimensions ?? []), [qaRetryState?.failingDimensions]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -258,4 +262,4 @@ export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
       </div>
     </div>
   );
-}
+});
