@@ -23,7 +23,7 @@
 //   Replace the disabled input with a controlled input and wire the Send button to sendMessage().
 
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, memo } from 'react';
 import { Bot, Send, Loader2, Brain, Wrench, MessageSquare, Zap } from 'lucide-react';
 import type { AgentRole, AgentMessage, AgentStatuses, ActiveActivities } from '../types';
 import type { StreamingMessage } from '../stores/agentStore';
@@ -70,7 +70,7 @@ interface ActivityBarProps {
   activeActivities: ActiveActivities;
 }
 
-function ActivityBar({ agentStatuses, activeActivities }: ActivityBarProps) {
+const ActivityBar = memo(function ActivityBar({ agentStatuses, activeActivities }: ActivityBarProps) {
   const activeAgents = (Object.keys(agentStatuses) as AgentRole[]).filter(
     (r) => agentStatuses[r] !== 'idle'
   );
@@ -107,7 +107,53 @@ function ActivityBar({ agentStatuses, activeActivities }: ActivityBarProps) {
       })}
     </div>
   );
-}
+});
+
+const ChatMessageItem = memo(function ChatMessageItem({ msg, cfg }: { msg: AgentMessage, cfg: typeof agentConfig[AgentRole] }) {
+  return (
+    <div className="group">
+      <div className="flex items-start gap-2">
+        <div className={`mt-0.5 shrink-0 flex items-center justify-center w-5 h-5 rounded ${cfg.bg} border ${cfg.border}`}>
+          <Bot className={`w-3 h-3 ${cfg.color}`} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <span className={`text-[11px] font-semibold ${cfg.color}`}>{cfg.label}</span>
+            <span className="text-[10px] text-slate-600">{msg.timestamp}</span>
+          </div>
+          <p className="text-[12px] text-slate-300 leading-relaxed break-words">
+            {msg.content}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const StreamingMessageItem = memo(function StreamingMessageItem({ stream, cfg }: { stream: StreamingMessage, cfg: typeof agentConfig[AgentRole] }) {
+  return (
+    <div className="group">
+      <div className="flex items-start gap-2">
+        <div className={`mt-0.5 shrink-0 flex items-center justify-center w-5 h-5 rounded ${cfg.bg} border ${cfg.border}`}>
+          <Bot className={`w-3 h-3 ${cfg.color} animate-pulse`} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <span className={`text-[11px] font-semibold ${cfg.color}`}>{cfg.label}</span>
+            <span className="text-[10px] text-sky-500/60 flex items-center gap-1">
+              <Loader2 className="w-2.5 h-2.5 animate-spin" />
+              streaming
+            </span>
+          </div>
+          <p className="text-[12px] text-slate-300 leading-relaxed break-words">
+            {stream.content}
+            <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-sky-400/70 animate-pulse rounded-sm align-text-bottom" />
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 interface AgentChatterProps {
   messages: AgentMessage[];
@@ -190,54 +236,14 @@ export function AgentChatter({ messages, agentStatuses, activeActivities, stream
         <ActivityBar agentStatuses={agentStatuses} activeActivities={activeActivities} />
 
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
-          {messages.map((msg) => {
-            const cfg = agentConfig[msg.agent];
-            return (
-              <div key={msg.id} className="group">
-                <div className="flex items-start gap-2">
-                  <div className={`mt-0.5 shrink-0 flex items-center justify-center w-5 h-5 rounded ${cfg.bg} border ${cfg.border}`}>
-                    <Bot className={`w-3 h-3 ${cfg.color}`} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className={`text-[11px] font-semibold ${cfg.color}`}>{cfg.label}</span>
-                      <span className="text-[10px] text-slate-600">{msg.timestamp}</span>
-                    </div>
-                    <p className="text-[12px] text-slate-300 leading-relaxed break-words">
-                      {msg.content}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+          {messages.map((msg) => (
+            <ChatMessageItem key={msg.id} msg={msg} cfg={agentConfig[msg.agent]} />
+          ))}
 
           {/* ── Streaming Messages (in-flight LLM tokens) ──────────────── */}
-          {streamingEntries.map(([msgId, stream]) => {
-            const cfg = agentConfig[stream.role];
-            return (
-              <div key={`stream-${msgId}`} className="group">
-                <div className="flex items-start gap-2">
-                  <div className={`mt-0.5 shrink-0 flex items-center justify-center w-5 h-5 rounded ${cfg.bg} border ${cfg.border}`}>
-                    <Bot className={`w-3 h-3 ${cfg.color} animate-pulse`} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className={`text-[11px] font-semibold ${cfg.color}`}>{cfg.label}</span>
-                      <span className="text-[10px] text-sky-500/60 flex items-center gap-1">
-                        <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                        streaming
-                      </span>
-                    </div>
-                    <p className="text-[12px] text-slate-300 leading-relaxed break-words">
-                      {stream.content}
-                      <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-sky-400/70 animate-pulse rounded-sm align-text-bottom" />
-                    </p>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+          {streamingEntries.map(([msgId, stream]) => (
+            <StreamingMessageItem key={`stream-${msgId}`} stream={stream} cfg={agentConfig[stream.role]} />
+          ))}
 
           <div ref={bottomRef} />
         </div>
