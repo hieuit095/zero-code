@@ -15,7 +15,7 @@
 
 
 import { AlertTriangle, CheckCircle2, Circle, Loader2, ChevronDown, ChevronRight, RotateCw } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useCallback, useMemo, memo } from 'react';
 import type { Task, AgentRole } from '../types';
 
 const agentBadge: Record<AgentRole, string> = {
@@ -48,7 +48,7 @@ const SCORE_LABELS: Record<string, { label: string; threshold: number }> = {
   security: { label: 'Security', threshold: 90 },
 };
 
-function ScoreBar({ dim, value, isFailing }: { dim: string; value: number; isFailing: boolean }) {
+const ScoreBar = memo(function ScoreBar({ dim, value, isFailing }: { dim: string; value: number; isFailing: boolean }) {
   const info = SCORE_LABELS[dim] ?? { label: dim, threshold: 70 };
   const pct = Math.max(0, Math.min(100, value));
   const barColor = isFailing
@@ -77,7 +77,70 @@ function ScoreBar({ dim, value, isFailing }: { dim: string; value: number; isFai
       </span>
     </div>
   );
+});
+
+interface TaskItemProps {
+  task: Task;
+  isExpanded: boolean;
+  isRetrying: boolean;
+  onToggle: (id: string) => void;
 }
+
+const TaskItem = memo(function TaskItem({ task, isExpanded, isRetrying, onToggle }: TaskItemProps) {
+  return (
+    <div className="mb-0.5">
+      <div
+        className={`flex items-start gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${isRetrying
+          ? 'bg-amber-500/5 hover:bg-amber-500/10 ring-1 ring-amber-500/20'
+          : task.status === 'in-progress'
+            ? 'bg-sky-500/5 hover:bg-sky-500/10'
+            : 'hover:bg-slate-800'
+          }`}
+        onClick={() => task.subtasks && onToggle(task.id)}
+      >
+        <div className="mt-0.5 shrink-0">
+          {isRetrying && <RotateCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />}
+          {!isRetrying && task.status === 'completed' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+          {!isRetrying && task.status === 'in-progress' && <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin" />}
+          {!isRetrying && task.status === 'pending' && <Circle className="w-3.5 h-3.5 text-slate-600" />}
+        </div>
+        <span className={`flex-1 text-xs leading-relaxed ${isRetrying
+          ? 'text-amber-200'
+          : task.status === 'completed'
+            ? 'text-slate-500 line-through'
+            : task.status === 'in-progress'
+              ? 'text-slate-200'
+              : 'text-slate-400'
+          }`}>
+          {task.label}
+        </span>
+        {isRetrying && (
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border text-amber-300 bg-amber-500/10 border-amber-500/20 shrink-0">
+            Retry
+          </span>
+        )}
+        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${agentBadge[task.agent]} shrink-0`}>
+          {agentLabel[task.agent]}
+        </span>
+        {task.subtasks && (
+          <span className="text-slate-600 shrink-0">
+            {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          </span>
+        )}
+      </div>
+      {isExpanded && task.subtasks && (
+        <div className="ml-7 mt-0.5 space-y-0.5 pb-1">
+          {task.subtasks.map((sub, i) => (
+            <div key={i} className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] text-slate-500">
+              <span className="w-1 h-1 rounded-full bg-slate-700 shrink-0" />
+              {sub}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 interface TasksPanelProps {
   tasks: Task[];
@@ -87,22 +150,22 @@ interface TasksPanelProps {
 export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const toggle = (id: string) => {
+  const toggle = useCallback((id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  };
+  }, []);
 
-  const statusCounts = {
+  const statusCounts = useMemo(() => ({
     completed: tasks.filter((t) => t.status === 'completed').length,
     'in-progress': tasks.filter((t) => t.status === 'in-progress').length,
     pending: tasks.filter((t) => t.status === 'pending').length,
-  };
+  }), [tasks]);
 
-  const failingSet = new Set(qaRetryState?.failingDimensions ?? []);
+  const failingSet = useMemo(() => new Set(qaRetryState?.failingDimensions ?? []), [qaRetryState?.failingDimensions]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -198,63 +261,15 @@ export function TasksPanel({ tasks, qaRetryState }: TasksPanelProps) {
       )}
 
       <div className="flex-1 overflow-y-auto px-2 py-1">
-        {tasks.map((task) => {
-          const isExpanded = expanded.has(task.id);
-          const isRetrying = qaRetryState?.taskId === task.id && qaRetryState.status === 'retrying';
-          return (
-            <div key={task.id} className="mb-0.5">
-              <div
-                className={`flex items-start gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${isRetrying
-                  ? 'bg-amber-500/5 hover:bg-amber-500/10 ring-1 ring-amber-500/20'
-                  : task.status === 'in-progress'
-                    ? 'bg-sky-500/5 hover:bg-sky-500/10'
-                    : 'hover:bg-slate-800'
-                  }`}
-                onClick={() => task.subtasks && toggle(task.id)}
-              >
-                <div className="mt-0.5 shrink-0">
-                  {isRetrying && <RotateCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />}
-                  {!isRetrying && task.status === 'completed' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
-                  {!isRetrying && task.status === 'in-progress' && <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin" />}
-                  {!isRetrying && task.status === 'pending' && <Circle className="w-3.5 h-3.5 text-slate-600" />}
-                </div>
-                <span className={`flex-1 text-xs leading-relaxed ${isRetrying
-                  ? 'text-amber-200'
-                  : task.status === 'completed'
-                    ? 'text-slate-500 line-through'
-                    : task.status === 'in-progress'
-                      ? 'text-slate-200'
-                      : 'text-slate-400'
-                  }`}>
-                  {task.label}
-                </span>
-                {isRetrying && (
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border text-amber-300 bg-amber-500/10 border-amber-500/20 shrink-0">
-                    Retry
-                  </span>
-                )}
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${agentBadge[task.agent]} shrink-0`}>
-                  {agentLabel[task.agent]}
-                </span>
-                {task.subtasks && (
-                  <span className="text-slate-600 shrink-0">
-                    {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                  </span>
-                )}
-              </div>
-              {isExpanded && task.subtasks && (
-                <div className="ml-7 mt-0.5 space-y-0.5 pb-1">
-                  {task.subtasks.map((sub, i) => (
-                    <div key={i} className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] text-slate-500">
-                      <span className="w-1 h-1 rounded-full bg-slate-700 shrink-0" />
-                      {sub}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {tasks.map((task) => (
+          <TaskItem
+            key={task.id}
+            task={task}
+            isExpanded={expanded.has(task.id)}
+            isRetrying={qaRetryState?.taskId === task.id && qaRetryState.status === 'retrying'}
+            onToggle={toggle}
+          />
+        ))}
       </div>
     </div>
   );
