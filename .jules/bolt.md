@@ -1,3 +1,6 @@
 ## 2024-04-03 - Agent Chat Re-render Bottleneck
 **Learning:** In `AgentChatter.tsx`, high-frequency WebSocket streaming events (e.g., token-by-token LLM output) caused the entire message history to re-render. Because the `messages` array was mapped inline, every incoming token triggered a full DOM reconciliation for all historical chat bubbles, resulting in an O(N) render cost that degraded performance linearly as the chat lengthened.
 **Action:** Always extract items mapped in high-frequency update loops (like streaming logs or chat tokens) into separate components wrapped in `React.memo()`. This creates an O(1) rendering cost where only the actively changing item re-renders, preventing UI stuttering and wasted CPU cycles.
+## 2024-04-13 - TasksPanel Re-render Bottleneck
+**Learning:** Similar to `AgentChatter.tsx`, `TasksPanel.tsx` mapped tasks inline within its render cycle. This caused a full O(N) DOM reconciliation across all tasks whenever the panel re-rendered (e.g. from an expanded task state change or parent prop change).
+**Action:** Extracted the task list mapping into a `TaskItem` component wrapped with `React.memo()`, and wrapped the `toggle` handler in `React.useCallback()` with an empty dependency array. This successfully turns the high-frequency re-rendering of large lists from O(N) to O(1), improving scroll fluidity and CPU usage.
