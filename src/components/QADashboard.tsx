@@ -17,6 +17,7 @@
 //             ZERO mocks, ZERO hardcoded fallback data.
 
 
+import { memo } from 'react';
 import { CheckCircle2, XCircle, Shield, Code2, FileCheck, Bug } from 'lucide-react';
 import type { QaScoreEntry } from '../stores/agentStore';
 
@@ -79,6 +80,78 @@ function DimensionBar({ dim, value, isFailing }: { dim: string; value: number; i
   );
 }
 
+// ⚡ Bolt: Extracted QAScoreItem into a memoized component.
+// Why: High-frequency QA score history updates were causing the entire list
+// to re-render in O(N) time. Wrapping this in React.memo() converts the re-render cost
+// to O(1) so only newly added items render, while existing items remain stable.
+const QAScoreItem = memo(function QAScoreItem({ entry }: { entry: QaScoreEntry }) {
+  const failingSet = new Set(entry.failingDimensions);
+  const isPassed = entry.status === 'passed';
+
+  return (
+    <div
+      className={`rounded-lg border p-3 transition-all ${
+        isPassed
+          ? 'bg-emerald-500/5 border-emerald-500/15'
+          : 'bg-red-500/5 border-red-500/15'
+      }`}
+    >
+      {/* Entry header */}
+      <div className="flex items-center gap-2 mb-2.5">
+        {isPassed ? (
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+        ) : (
+          <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+        )}
+        <span className={`text-[11px] font-semibold ${isPassed ? 'text-emerald-300' : 'text-red-300'}`}>
+          {isPassed ? 'Passed' : 'Failed'}
+        </span>
+        <span className="text-[10px] text-slate-500">
+          Attempt {entry.attempt}
+        </span>
+        <div className="flex-1" />
+        <span className="text-[9px] font-mono text-slate-600 truncate max-w-[120px]">
+          {entry.taskId}
+        </span>
+      </div>
+
+      {/* Dimensional score bars */}
+      <div className="space-y-1.5 mb-2">
+        {DIMENSION_ORDER.map((dim) => {
+          const value = entry.scores[dim];
+          if (value === undefined) return null;
+          return (
+            <DimensionBar
+              key={dim}
+              dim={dim}
+              value={value}
+              isFailing={failingSet.has(dim)}
+            />
+          );
+        })}
+        {/* Render any extra dimensions not in the standard 4 */}
+        {Object.entries(entry.scores)
+          .filter(([dim]) => !DIMENSION_ORDER.includes(dim))
+          .map(([dim, value]) => (
+            <DimensionBar
+              key={dim}
+              dim={dim}
+              value={value}
+              isFailing={failingSet.has(dim)}
+            />
+          ))}
+      </div>
+
+      {/* Summary text */}
+      {entry.summary && (
+        <p className="text-[10px] text-slate-500 leading-relaxed line-clamp-2">
+          {entry.summary}
+        </p>
+      )}
+    </div>
+  );
+});
+
 interface QADashboardProps {
   qaScoreHistory: QaScoreEntry[];
 }
@@ -114,74 +187,12 @@ export function QADashboard({ qaScoreHistory }: QADashboardProps) {
 
       {/* Score history list */}
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
-        {qaScoreHistory.map((entry, idx) => {
-          const failingSet = new Set(entry.failingDimensions);
-          const isPassed = entry.status === 'passed';
-
-          return (
-            <div
-              key={`qa-${idx}-${entry.taskId}-${entry.attempt}`}
-              className={`rounded-lg border p-3 transition-all ${
-                isPassed
-                  ? 'bg-emerald-500/5 border-emerald-500/15'
-                  : 'bg-red-500/5 border-red-500/15'
-              }`}
-            >
-              {/* Entry header */}
-              <div className="flex items-center gap-2 mb-2.5">
-                {isPassed ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                ) : (
-                  <XCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                )}
-                <span className={`text-[11px] font-semibold ${isPassed ? 'text-emerald-300' : 'text-red-300'}`}>
-                  {isPassed ? 'Passed' : 'Failed'}
-                </span>
-                <span className="text-[10px] text-slate-500">
-                  Attempt {entry.attempt}
-                </span>
-                <div className="flex-1" />
-                <span className="text-[9px] font-mono text-slate-600 truncate max-w-[120px]">
-                  {entry.taskId}
-                </span>
-              </div>
-
-              {/* Dimensional score bars */}
-              <div className="space-y-1.5 mb-2">
-                {DIMENSION_ORDER.map((dim) => {
-                  const value = entry.scores[dim];
-                  if (value === undefined) return null;
-                  return (
-                    <DimensionBar
-                      key={dim}
-                      dim={dim}
-                      value={value}
-                      isFailing={failingSet.has(dim)}
-                    />
-                  );
-                })}
-                {/* Render any extra dimensions not in the standard 4 */}
-                {Object.entries(entry.scores)
-                  .filter(([dim]) => !DIMENSION_ORDER.includes(dim))
-                  .map(([dim, value]) => (
-                    <DimensionBar
-                      key={dim}
-                      dim={dim}
-                      value={value}
-                      isFailing={failingSet.has(dim)}
-                    />
-                  ))}
-              </div>
-
-              {/* Summary text */}
-              {entry.summary && (
-                <p className="text-[10px] text-slate-500 leading-relaxed line-clamp-2">
-                  {entry.summary}
-                </p>
-              )}
-            </div>
-          );
-        })}
+        {qaScoreHistory.map((entry, idx) => (
+          <QAScoreItem
+            key={`qa-${idx}-${entry.taskId}-${entry.attempt}`}
+            entry={entry}
+          />
+        ))}
       </div>
     </div>
   );
