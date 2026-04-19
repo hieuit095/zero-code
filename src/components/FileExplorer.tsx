@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,13 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// ⚡ BOLT OPTIMIZATION: Memoize FileRow to prevent unnecessary O(N) re-renders
+// Since FileExplorer receives high-frequency file updates (streaming logs, websocket syncs),
+// without memoization, every file change would cause the entire tree to re-render.
+// By wrapping FileRow in React.memo(), we prevent full re-renders for unrelated
+// FileExplorer state changes. Note: Selection changes still trigger an O(N) re-render
+// since selectedId is passed to all components.
+const FileRow = memo(({ node, depth, selectedId, onSelect }: FileRowProps) => {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,13 +126,23 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
   const { sendMessage } = useRunConnection();
   const workspaceId = useSettingsStore((s) => s.workspaceId);
   const setWorkspaceId = useSettingsStore((s) => s.setWorkspaceId);
+
+  // ⚡ BOLT OPTIMIZATION: Stable callback reference
+  // By wrapping the callback in useCallback, we ensure its reference is stable across renders.
+  // This is crucial because FileRow is wrapped in React.memo(). Without useCallback,
+  // an inline arrow function would recreate the reference on every FileExplorer render,
+  // invalidating the memoization of the child components and causing full tree re-renders.
+  const handleSelect = useCallback(
+    (id: string) => fetchAndOpenFile(id, workspaceId),
+    [fetchAndOpenFile, workspaceId]
+  );
 
   const handleRefresh = () => {
     sendMessage({
@@ -209,7 +225,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelect}
             />
           ))
         )}
