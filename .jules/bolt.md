@@ -1,3 +1,7 @@
 ## 2024-04-03 - Agent Chat Re-render Bottleneck
 **Learning:** In `AgentChatter.tsx`, high-frequency WebSocket streaming events (e.g., token-by-token LLM output) caused the entire message history to re-render. Because the `messages` array was mapped inline, every incoming token triggered a full DOM reconciliation for all historical chat bubbles, resulting in an O(N) render cost that degraded performance linearly as the chat lengthened.
 **Action:** Always extract items mapped in high-frequency update loops (like streaming logs or chat tokens) into separate components wrapped in `React.memo()`. This creates an O(1) rendering cost where only the actively changing item re-renders, preventing UI stuttering and wasted CPU cycles.
+
+## 2026-04-21 - Recursive Component Memoization Pattern
+**Learning:** When applying `React.memo()` to recursive functional components (like `FileRow` in the file tree), avoid using a named function expression matching the outer variable (e.g., `const FileRow = memo(function FileRow(...) { ... <FileRow /> })`). The inner name binds to the unmemoized function within the local scope, causing recursive calls to bypass memoization and triggering O(N) re-render cascades.
+**Action:** Use an anonymous arrow function inside `memo` (e.g., `const FileRow = memo((...) => { ... <FileRow /> })`) so that recursive calls correctly reference the memoized wrapper bound to the outer variable.
