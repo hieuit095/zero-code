@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, useCallback, memo } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,7 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+const FileRow = memo(function FileRowImpl({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,13 +120,18 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
   const { sendMessage } = useRunConnection();
   const workspaceId = useSettingsStore((s) => s.workspaceId);
   const setWorkspaceId = useSettingsStore((s) => s.setWorkspaceId);
+
+  const handleSelect = useCallback(
+    (id: string, _name: string) => fetchAndOpenFile(id, workspaceId),
+    [fetchAndOpenFile, workspaceId]
+  );
 
   const handleRefresh = () => {
     sendMessage({
@@ -209,7 +214,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelect}
             />
           ))
         )}
