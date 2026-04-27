@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, useCallback, memo } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,11 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// ⚡ Bolt: Wrapped FileRow in React.memo() to prevent O(N) re-render cascades
+// across the recursive file tree when parent UI state changes.
+// Used an anonymous arrow function inside memo to avoid shadowing the component name,
+// which ensures recursive child calls use the memoized wrapper.
+const FileRow = memo(({ node, depth, selectedId, onSelect }: FileRowProps) => {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +124,7 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +160,12 @@ export function FileExplorer() {
       });
     }
   };
+
+  // ⚡ Bolt: Extracted onSelect callback into a stable useCallback
+  // to ensure memoized FileRow children do not unnecessarily re-render.
+  const handleSelectFile = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +219,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelectFile}
             />
           ))
         )}
