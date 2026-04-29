@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,23 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+function areFileRowPropsEqual(prev: FileRowProps, next: FileRowProps) {
+  if (prev.node !== next.node) return false;
+  if (prev.depth !== next.depth) return false;
+  if (prev.onSelect !== next.onSelect) return false;
+
+  const wasSelected = prev.selectedId === prev.node.id || prev.selectedId === prev.node.name;
+  const isSelected = next.selectedId === next.node.id || next.selectedId === next.node.name;
+
+  return wasSelected === isSelected;
+}
+
+// ⚡ Bolt: Memoized the recursive FileRow component with a custom equality function.
+// Why: When the globally active selectedId changes, it is passed to all FileRow children.
+// A shallow props comparison would fail for all nodes since the ID string changes.
+// The custom areFileRowPropsEqual function compares the *derived* selection state,
+// ensuring that only the previously selected and newly selected nodes re-render (O(1) cost).
+const FileRow = memo(function FileRowInner({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +136,7 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, areFileRowPropsEqual);
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +172,11 @@ export function FileExplorer() {
       });
     }
   };
+
+  // ⚡ Bolt: Stable callback reference for the memoized FileRow children.
+  const handleFileSelect = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +230,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleFileSelect}
             />
           ))
         )}
