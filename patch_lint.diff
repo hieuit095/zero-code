@@ -1,0 +1,10 @@
+--- src/components/FileExplorer.tsx
++++ src/components/FileExplorer.tsx
+@@ -171,7 +171,7 @@
+   };
+
+   // ⚡ Bolt: Memoized the selection handler with useCallback
+-  const handleSelect = useCallback((id: string, name: string) => {
++  const handleSelect = useCallback((id: string, _name: string) => {
+     fetchAndOpenFile(id, workspaceId);
+   }, [fetchAndOpenFile, workspaceId]);

@@ -173,7 +173,7 @@ export function FileExplorer() {
   };
 
   // ⚡ Bolt: Memoized the selection handler with useCallback
-  const handleSelect = useCallback((id: string) => {
+  const handleSelect = useCallback((id: string, name: string) => {
     fetchAndOpenFile(id, workspaceId);
   }, [fetchAndOpenFile, workspaceId]);
 

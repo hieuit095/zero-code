@@ -1,0 +1,65 @@
+--- src/components/FileExplorer.tsx
++++ src/components/FileExplorer.tsx
+@@ -23,7 +23,7 @@
+ //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
+
+
+-import { useState } from 'react';
++import React, { useState, memo, useCallback } from 'react';
+ import {
+   ChevronRight,
+   ChevronDown,
+@@ -62,7 +62,15 @@
+   return 'text-slate-300';
+ }
+
+-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
++// ⚡ Bolt: Extracted recursive FileRow into a memoized component.
++// Why: High-frequency tab switching caused the entire recursive file tree
++// to re-render in O(N) time. By using React.memo() with a custom comparison,
++// we convert the re-render cost to O(1).
++// Note: Branch nodes (folders) must always return false to propagate props
++// down to children, while leaf nodes (files) only re-render if their derived
++// isSelected state changes. Also, we use an anonymous arrow function inside memo
++// to avoid name shadowing for the recursive calls.
++const FileRow = memo(({ node, depth, selectedId, onSelect }: FileRowProps) => {
+   const [expanded, setExpanded] = useState(depth < 1);
+   const isSelected = selectedId === node.id || selectedId === node.name;
+   const isFolder = node.type === 'folder';
+@@ -109,7 +117,14 @@
+       ))}
+     </>
+   );
+-}
++}, (prevProps, nextProps) => {
++  // Folders must always re-render to propagate prop changes to their children
++  if (nextProps.node.type === 'folder') return false;
++
++  const wasSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
++  const isSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
++  return wasSelected === isSelected && prevProps.node === nextProps.node && prevProps.depth === nextProps.depth && prevProps.onSelect === nextProps.onSelect;
++});
+
+ export function FileExplorer() {
+   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
+@@ -142,6 +157,11 @@
+       });
+     }
+   };
++
++  // ⚡ Bolt: Memoized the selection handler with useCallback
++  const handleSelect = useCallback((id: string, name: string) => {
++    fetchAndOpenFile(id, workspaceId);
++  }, [fetchAndOpenFile, workspaceId]);
+
+   return (
+     <div className="flex flex-col h-full">
+@@ -192,7 +212,7 @@
+               node={node}
+               depth={0}
+               selectedId={activeTabId}
+-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
++              onSelect={handleSelect}
+             />
+           ))
+         )}
