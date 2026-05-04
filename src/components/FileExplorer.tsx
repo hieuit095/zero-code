@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,10 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// @ai-performance: Wrap recursive list item in React.memo to convert O(N) re-renders to O(1)
+// We use a distinct inner name (FileRowInternal) to avoid shadowing the memoized wrapper,
+// which would cause recursive calls to use the unmemoized version.
+const FileRowInternal = ({ node, depth, selectedId, onSelect }: FileRowProps) => {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,13 +123,37 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+};
+
+const FileRow = memo(FileRowInternal, (prevProps, nextProps) => {
+  // @ai-performance: Branch nodes (folders) must always re-render to propagate
+  // selectedId changes down to their children.
+  if (prevProps.node.type === 'folder') {
+    return false;
+  }
+
+  // @ai-performance: For leaf nodes (files), only re-render if their specific selection state changes
+  const prevSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const nextSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  return (
+    prevSelected === nextSelected &&
+    prevProps.node === nextProps.node &&
+    prevProps.depth === nextProps.depth &&
+    prevProps.onSelect === nextProps.onSelect
+  );
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
   const { sendMessage } = useRunConnection();
   const workspaceId = useSettingsStore((s) => s.workspaceId);
   const setWorkspaceId = useSettingsStore((s) => s.setWorkspaceId);
+
+  // @ai-performance: Wrap callback in useCallback to avoid breaking FileRow memoization
+  const handleSelect = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   const handleRefresh = () => {
     sendMessage({
@@ -209,7 +236,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelect}
             />
           ))
         )}
