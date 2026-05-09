@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -46,7 +46,7 @@ interface FileRowProps {
   node: FileNode;
   depth: number;
   selectedId: string | null;
-  onSelect: (id: string, displayName: string) => void;
+  onSelect: (id: string, displayName?: string) => void;
 }
 
 function getFileIcon(language?: string) {
@@ -66,7 +66,10 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// ⚡ Bolt: Wrapped FileRow in React.memo() with a custom comparator to prevent O(N) re-renders
+// when selecting different files. Folders are explicitly excluded from memoization so they
+// can successfully propagate new props (like selectedId) down to their leaf children.
+const FileRow = memo(function FileRowImpl({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +123,21 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prevProps, nextProps) => {
+  // Folders must always re-render to propagate prop changes to their potentially un-mounted children
+  if (prevProps.node.type === 'folder' || nextProps.node.type === 'folder') {
+    return false;
+  }
+
+  // For files, only re-render if their specific selection state changed
+  const prevIsSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const nextIsSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  return prevIsSelected === nextIsSelected &&
+         prevProps.node === nextProps.node &&
+         prevProps.depth === nextProps.depth &&
+         prevProps.onSelect === nextProps.onSelect;
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +173,13 @@ export function FileExplorer() {
       });
     }
   };
+
+  // ⚡ Bolt: Wrap file selection handler in useCallback to maintain a stable reference.
+  // This avoids passing a new inline function on every render, which would break the
+  // React.memo optimizations on FileRow.
+  const handleSelect = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +233,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelect}
             />
           ))
         )}
