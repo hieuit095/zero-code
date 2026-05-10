@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,61 +66,77 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
-  const [expanded, setExpanded] = useState(depth < 1);
-  const isSelected = selectedId === node.id || selectedId === node.name;
-  const isFolder = node.type === 'folder';
+const MemoizedFileRow = memo(
+  function FileRowComponent({ node, depth, selectedId, onSelect }: FileRowProps) {
+    const [expanded, setExpanded] = useState(depth < 1);
+    const isSelected = selectedId === node.id || selectedId === node.name;
+    const isFolder = node.type === 'folder';
 
-  const handleClick = () => {
-    if (isFolder) {
-      setExpanded((p) => !p);
-    } else {
-      onSelect(node.id, node.name);
-    }
-  };
+    const handleClick = () => {
+      if (isFolder) {
+        setExpanded((p) => !p);
+      } else {
+        onSelect(node.id, node.name);
+      }
+    };
 
-  return (
-    <>
-      <div
-        onClick={handleClick}
-        className={`flex items-center gap-1.5 px-2 py-[3px] cursor-pointer text-xs rounded-sm mx-1 select-none group transition-colors ${isSelected
-          ? 'bg-sky-500/15 text-sky-300'
-          : 'hover:bg-slate-800 text-slate-300 hover:text-slate-100'
-          }`}
-        style={{ paddingLeft: `${depth * 12 + 8}px` }}
-      >
-        {isFolder ? (
-          <span className="text-slate-500">
-            {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          </span>
-        ) : (
-          <span className="w-3" />
-        )}
-        {isFolder ? (
-          expanded ? (
-            <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+    return (
+      <>
+        <div
+          onClick={handleClick}
+          className={`flex items-center gap-1.5 px-2 py-[3px] cursor-pointer text-xs rounded-sm mx-1 select-none group transition-colors ${isSelected
+            ? 'bg-sky-500/15 text-sky-300'
+            : 'hover:bg-slate-800 text-slate-300 hover:text-slate-100'
+            }`}
+          style={{ paddingLeft: `${depth * 12 + 8}px` }}
+        >
+          {isFolder ? (
+            <span className="text-slate-500">
+              {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            </span>
           ) : (
-            <Folder className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-          )
-        ) : (
-          <span className="shrink-0">{getFileIcon(node.language)}</span>
-        )}
-        <span className={`truncate ${isFolder ? 'text-slate-200' : getFileColor(node.name)}`}>
-          {node.name}
-        </span>
-      </div>
-      {isFolder && expanded && node.children?.map((child) => (
-        <FileRow
-          key={child.id}
-          node={child}
-          depth={depth + 1}
-          selectedId={selectedId}
-          onSelect={onSelect}
-        />
-      ))}
-    </>
-  );
-}
+            <span className="w-3" />
+          )}
+          {isFolder ? (
+            expanded ? (
+              <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            ) : (
+              <Folder className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            )
+          ) : (
+            <span className="shrink-0">{getFileIcon(node.language)}</span>
+          )}
+          <span className={`truncate ${isFolder ? 'text-slate-200' : getFileColor(node.name)}`}>
+            {node.name}
+          </span>
+        </div>
+        {isFolder && expanded && node.children?.map((child) => (
+          <MemoizedFileRow
+            key={child.id}
+            node={child}
+            depth={depth + 1}
+            selectedId={selectedId}
+            onSelect={onSelect}
+          />
+        ))}
+      </>
+    );
+  },
+  (prevProps, nextProps) => {
+    // Folders must always re-render to propagate props to children
+    if (prevProps.node.type === 'folder') return false;
+
+    // Evaluate derived selected state
+    const prevSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+    const nextSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+    return (
+      prevProps.node === nextProps.node &&
+      prevProps.depth === nextProps.depth &&
+      prevSelected === nextSelected
+    );
+  }
+);
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +172,11 @@ export function FileExplorer() {
       });
     }
   };
+
+  const handleSelect = useCallback(
+    (id: string) => fetchAndOpenFile(id, workspaceId),
+    [fetchAndOpenFile, workspaceId]
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -204,12 +225,12 @@ export function FileExplorer() {
           </div>
         ) : (
           fileTree.map((node) => (
-            <FileRow
+            <MemoizedFileRow
               key={node.id}
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelect}
             />
           ))
         )}
