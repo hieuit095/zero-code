@@ -185,7 +185,7 @@ export const useSettingsStore = create<SettingsState>()(
         apiKeys: state.apiKeys,
       }),
       // Migrate old localStorage shape (openaiApiKey/openrouterApiKey) to new generic map
-      migrate: (persisted: unknown, version: number) => {
+      migrate: (persisted: unknown) => {
         const state = persisted as Record<string, unknown>;
         if (state && typeof state === 'object' && state.apiKeys) {
           const keys = state.apiKeys as Record<string, string>;
