@@ -58,7 +58,7 @@ export function useAgentConnection(): AgentConnectionReturn {
     // registered by useRunConnection when the connection is active.
     sendMessage: ((payload: unknown): boolean => {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { _getWsSend } = require('./useRunConnection') as {
           _getWsSend: () => ((e: unknown) => boolean) | null;
         };
