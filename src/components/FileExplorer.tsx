@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,13 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// ⚡ Bolt: Memoized FileRow component with a custom comparison function to prevent O(N) re-renders
+// when the active tab changes.
+// Why: When a new file is selected, the activeTabId prop changes. Without memoization, this caused
+// the entire virtual file tree to re-render.
+// Impact: Reduces recursive tree re-renders from O(N) to O(1) where only the previously active and newly active files re-render.
+// Measurement: Open React Profiler, select a file, and verify that only the affected leaf nodes render instead of the entire tree.
+const FileRow = memo(function FileRowInternal({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +126,19 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prev, next) => {
+  // Always re-render branch nodes so they can propagate selection state downwards.
+  if (next.node.type === 'folder') return false;
+  // For leaf nodes, only re-render if they were previously selected, are now selected,
+  // or if stable props changed.
+  const prevSelected = prev.selectedId === prev.node.id || prev.selectedId === prev.node.name;
+  const nextSelected = next.selectedId === next.node.id || next.selectedId === next.node.name;
+
+  return prev.node === next.node &&
+         prev.depth === next.depth &&
+         prev.onSelect === next.onSelect &&
+         prevSelected === nextSelected;
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +174,11 @@ export function FileExplorer() {
       });
     }
   };
+
+  // ⚡ Bolt: Stable callback to prevent re-renders of the memoized FileRow children
+  const handleSelect = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +232,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelect}
             />
           ))
         )}
