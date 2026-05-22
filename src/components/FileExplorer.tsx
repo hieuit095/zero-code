@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,13 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// ⚡ Bolt: Memoized FileRow component
+// Why: Passing down a globally active ID (selectedId) causes the entire File Explorer tree
+// to re-render whenever the active tab changes. For large workspaces, this O(N) re-render
+// creates a noticeable UI freeze.
+// Impact: O(1) rendering time where only the newly selected and previously selected files re-render.
+// Note: Folders must always re-render to propagate the new selectedId down to their children.
+const FileRow = memo(function FileRowInternal({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +126,25 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prevProps, nextProps) => {
+  // Folder nodes must always re-render to pass selectedId changes down their child trees.
+  if (nextProps.node.type === 'folder') return false;
+
+  // Basic prop equality.
+  if (
+    prevProps.node !== nextProps.node ||
+    prevProps.depth !== nextProps.depth ||
+    prevProps.onSelect !== nextProps.onSelect
+  ) {
+    return false;
+  }
+
+  // Custom logic: Only re-render a leaf node if its OWN selection state changes.
+  const wasSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const isSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  return wasSelected === isSelected;
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +180,11 @@ export function FileExplorer() {
       });
     }
   };
+
+  // ⚡ Bolt: Memoized selection handler to prevent invalidating the memoized FileRow children
+  const handleFileSelect = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +238,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleFileSelect}
             />
           ))
         )}
