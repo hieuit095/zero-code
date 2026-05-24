@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,7 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+const InnerFileRow = ({ node, depth, selectedId, onSelect }: FileRowProps) => {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -110,7 +110,7 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
         </span>
       </div>
       {isFolder && expanded && node.children?.map((child) => (
-        <FileRow
+        <MemoizedFileRow
           key={child.id}
           node={child}
           depth={depth + 1}
@@ -120,7 +120,25 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+};
+
+const MemoizedFileRow = React.memo(InnerFileRow, (prevProps, nextProps) => {
+  // If it's a folder, it must always re-render to propagate selectedId down to children
+  if (prevProps.node.type === 'folder') {
+    return false;
+  }
+
+  // Check stable props
+  if (prevProps.node !== nextProps.node) return false;
+  if (prevProps.depth !== nextProps.depth) return false;
+  if (prevProps.onSelect !== nextProps.onSelect) return false;
+
+  // For leaf nodes (files), only re-render if its specific selection state changed
+  const wasSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const isSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  return wasSelected === isSelected;
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +174,10 @@ export function FileExplorer() {
       });
     }
   };
+
+  const handleSelectFile = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -204,12 +226,12 @@ export function FileExplorer() {
           </div>
         ) : (
           fileTree.map((node) => (
-            <FileRow
+            <MemoizedFileRow
               key={node.id}
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelectFile}
             />
           ))
         )}
