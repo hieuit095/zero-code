@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,9 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// ⚡ Bolt: Memoized FileRow component to prevent O(N) re-renders of the entire file tree
+// when the active tab (selectedId) changes.
+const FileRow = memo(function FileRowInternal({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +122,19 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prevProps, nextProps) => {
+  // Folders must always re-render to propagate selectedId to their children.
+  if (prevProps.node.type === 'folder') return false;
+
+  // For files, only re-render if its specific selection state changed, or if stable props changed.
+  const wasSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const isSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  return wasSelected === isSelected &&
+    prevProps.node === nextProps.node &&
+    prevProps.depth === nextProps.depth &&
+    prevProps.onSelect === nextProps.onSelect;
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -134,6 +148,12 @@ export function FileExplorer() {
       data: { reason: 'manual_refresh' },
     });
   };
+
+  // ⚡ Bolt: Memoize onSelect callback to maintain stable function identity
+  // for the memoized FileRow children.
+  const handleSelectFile = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   const handleAddFile = () => {
     const fileName = window.prompt('Enter file path (e.g. src/utils/helpers.ts):');
@@ -209,7 +229,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelectFile}
             />
           ))
         )}
