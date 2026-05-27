@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,10 +66,11 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
-  const [expanded, setExpanded] = useState(depth < 1);
-  const isSelected = selectedId === node.id || selectedId === node.name;
-  const isFolder = node.type === 'folder';
+const FileRow = memo(
+  function ({ node, depth, selectedId, onSelect }: FileRowProps) {
+    const [expanded, setExpanded] = useState(depth < 1);
+    const isSelected = selectedId === node.id || selectedId === node.name;
+    const isFolder = node.type === 'folder';
 
   const handleClick = () => {
     if (isFolder) {
@@ -109,24 +110,54 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
           {node.name}
         </span>
       </div>
-      {isFolder && expanded && node.children?.map((child) => (
-        <FileRow
-          key={child.id}
-          node={child}
-          depth={depth + 1}
-          selectedId={selectedId}
-          onSelect={onSelect}
-        />
-      ))}
-    </>
-  );
-}
+        {isFolder && expanded && node.children?.map((child) => (
+          <FileRow
+            key={child.id}
+            node={child}
+            depth={depth + 1}
+            selectedId={selectedId}
+            onSelect={onSelect}
+          />
+        ))}
+      </>
+    );
+  },
+  (prevProps, nextProps) => {
+    // Folders MUST re-render to propagate updated props (like selectedId)
+    // to their recursive children. O(1) rendering only applies to leaf nodes.
+    if (prevProps.node.type === 'folder' || nextProps.node.type === 'folder') {
+      return false;
+    }
+
+    // Check if node selection state changed between renders
+    const prevIsSelected =
+      prevProps.selectedId === prevProps.node.id ||
+      prevProps.selectedId === prevProps.node.name;
+    const nextIsSelected =
+      nextProps.selectedId === nextProps.node.id ||
+      nextProps.selectedId === nextProps.node.name;
+
+    if (prevIsSelected !== nextIsSelected) return false;
+
+    // Check if other stable props changed
+    return (
+      prevProps.node === nextProps.node &&
+      prevProps.depth === nextProps.depth &&
+      prevProps.onSelect === nextProps.onSelect
+    );
+  }
+);
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
   const { sendMessage } = useRunConnection();
   const workspaceId = useSettingsStore((s) => s.workspaceId);
   const setWorkspaceId = useSettingsStore((s) => s.setWorkspaceId);
+
+  const handleSelectFile = useCallback(
+    (id: string) => fetchAndOpenFile(id, workspaceId),
+    [fetchAndOpenFile, workspaceId]
+  );
 
   const handleRefresh = () => {
     sendMessage({
@@ -209,7 +240,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelectFile}
             />
           ))
         )}
