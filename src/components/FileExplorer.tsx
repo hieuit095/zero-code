@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,11 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+// ⚡ Bolt: Memoized recursive file tree node to prevent O(N) re-render cascades.
+// Why: When the globally active ID (`selectedId`) changed, the entire recursive tree would re-render.
+// To achieve O(1) rendering, leaf nodes (files) are memoized, while branch nodes (folders) must
+// deliberately bypass memoization to propagate new props (like `selectedId`) down to their children.
+const MemoFileRow = memo(function InnerFileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -110,7 +114,7 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
         </span>
       </div>
       {isFolder && expanded && node.children?.map((child) => (
-        <FileRow
+        <MemoFileRow
           key={child.id}
           node={child}
           depth={depth + 1}
@@ -120,7 +124,22 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prev, next) => {
+  // Folders must ALWAYS re-render to propagate the `selectedId` down to children
+  if (prev.node.type === 'folder' || next.node.type === 'folder') return false;
+
+  // For leaf nodes (files), only re-render if its own selection state changes,
+  // or if stable props change (e.g. node identity, depth, or callback reference)
+  const wasSelected = prev.selectedId === prev.node.id || prev.selectedId === prev.node.name;
+  const isSelected = next.selectedId === next.node.id || next.selectedId === next.node.name;
+
+  return (
+    wasSelected === isSelected &&
+    prev.node === next.node &&
+    prev.depth === next.depth &&
+    prev.onSelect === next.onSelect
+  );
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +175,12 @@ export function FileExplorer() {
       });
     }
   };
+
+  // ⚡ Bolt: Extracted onSelect callback to ensure stable function reference
+  // so that MemoFileRow children are properly memoized and don't re-render unnecessarily.
+  const handleSelectFile = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -204,12 +229,12 @@ export function FileExplorer() {
           </div>
         ) : (
           fileTree.map((node) => (
-            <FileRow
+            <MemoFileRow
               key={node.id}
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelectFile}
             />
           ))
         )}
