@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,7 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+const FileRow = memo(function FileRowComponent({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +120,24 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prevProps, nextProps) => {
+  // If node or callback changed (should be stable), re-render
+  if (prevProps.node !== nextProps.node || prevProps.onSelect !== nextProps.onSelect || prevProps.depth !== nextProps.depth) {
+    return false;
+  }
+
+  // Folders MUST re-render to propagate selectedId down to their children.
+  // Otherwise, if a child file gets selected, the folder won't re-render and pass the new selectedId.
+  if (nextProps.node.type === 'folder') {
+    return false;
+  }
+
+  // For leaf nodes (files), only re-render if their SPECIFIC selection state changed.
+  const wasSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const isNowSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  return wasSelected === isNowSelected;
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +173,10 @@ export function FileExplorer() {
       });
     }
   };
+
+  const handleSelectFile = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +230,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelectFile}
             />
           ))
         )}
