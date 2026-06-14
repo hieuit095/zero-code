@@ -1,3 +1,7 @@
 ## 2024-04-03 - Agent Chat Re-render Bottleneck
 **Learning:** In `AgentChatter.tsx`, high-frequency WebSocket streaming events (e.g., token-by-token LLM output) caused the entire message history to re-render. Because the `messages` array was mapped inline, every incoming token triggered a full DOM reconciliation for all historical chat bubbles, resulting in an O(N) render cost that degraded performance linearly as the chat lengthened.
 **Action:** Always extract items mapped in high-frequency update loops (like streaming logs or chat tokens) into separate components wrapped in `React.memo()`. This creates an O(1) rendering cost where only the actively changing item re-renders, preventing UI stuttering and wasted CPU cycles.
+
+## 2025-02-23 - FileTree Recursive Re-render Bottleneck
+**Learning:** In `FileExplorer.tsx`, selecting a file caused the entire recursive file tree to re-render because the global `activeTabId` was passed down as a prop to every `FileRow` node, resulting in an O(N) re-render cascade for the entire tree. Even standard `React.memo` with shallow comparison wasn't sufficient because folder nodes need to re-render to propagate the new `selectedId` to children.
+**Action:** To achieve O(1) leaf-level updates in a recursive tree, use `React.memo` with a custom `arePropsEqual` function. Force branch nodes (folders) to always re-render (return `false`), and selectively memoize leaf nodes (files) by checking if their derived state (e.g., `isSelected`) actually changed. Also ensure passed callbacks are wrapped in `useCallback` at the root.
