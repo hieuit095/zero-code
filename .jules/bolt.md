@@ -1,3 +1,7 @@
 ## 2024-04-03 - Agent Chat Re-render Bottleneck
 **Learning:** In `AgentChatter.tsx`, high-frequency WebSocket streaming events (e.g., token-by-token LLM output) caused the entire message history to re-render. Because the `messages` array was mapped inline, every incoming token triggered a full DOM reconciliation for all historical chat bubbles, resulting in an O(N) render cost that degraded performance linearly as the chat lengthened.
 **Action:** Always extract items mapped in high-frequency update loops (like streaming logs or chat tokens) into separate components wrapped in `React.memo()`. This creates an O(1) rendering cost where only the actively changing item re-renders, preventing UI stuttering and wasted CPU cycles.
+
+## 2024-06-27 - Custom arePropsEqual for Recursive Component Memoization
+**Learning:** Standard React.memo() shallow comparison fails for recursive tree components where a globally active ID (e.g., selectedId) is passed down. Memoizing a recursive component where the inner function shares the same name as the memo wrapper can also cause recursive calls to use the unmemoized function.
+**Action:** When memoizing recursive components, ensure the inner function has a distinct name or use an anonymous function. Provide a custom arePropsEqual function that always returns false for branch nodes (folders) to propagate props to children, and only memoizes leaf nodes based on specific state changes. Use useCallback for event handlers passed down to memoized components.
