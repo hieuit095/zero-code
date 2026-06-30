@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,7 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+const FileRowInner = ({ node, depth, selectedId, onSelect }: FileRowProps) => {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +120,24 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+};
+
+const FileRow = React.memo(FileRowInner, (prevProps, nextProps) => {
+  // Folders must always re-render to propagate props to children
+  if (prevProps.node.type === 'folder') {
+    return false;
+  }
+
+  const prevIsSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const nextIsSelected = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  return (
+    prevIsSelected === nextIsSelected &&
+    prevProps.node === nextProps.node &&
+    prevProps.depth === nextProps.depth &&
+    prevProps.onSelect === nextProps.onSelect
+  );
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +173,10 @@ export function FileExplorer() {
       });
     }
   };
+
+  const handleSelectFile = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +230,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelectFile}
             />
           ))
         )}
