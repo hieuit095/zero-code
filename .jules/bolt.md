@@ -1,3 +1,6 @@
 ## 2024-04-03 - Agent Chat Re-render Bottleneck
 **Learning:** In `AgentChatter.tsx`, high-frequency WebSocket streaming events (e.g., token-by-token LLM output) caused the entire message history to re-render. Because the `messages` array was mapped inline, every incoming token triggered a full DOM reconciliation for all historical chat bubbles, resulting in an O(N) render cost that degraded performance linearly as the chat lengthened.
 **Action:** Always extract items mapped in high-frequency update loops (like streaming logs or chat tokens) into separate components wrapped in `React.memo()`. This creates an O(1) rendering cost where only the actively changing item re-renders, preventing UI stuttering and wasted CPU cycles.
+## 2024-07-02 - Consolidated DB Queries in RunStore
+**Learning:** In `RunStore.get_run_metrics`, multiple sequential database queries for counts were made one after another. This resulted in 5 separate database roundtrips. By consolidating these into a single query using scalar subqueries (`scalar_subquery()`), database roundtrips are reduced from 5 to 1, significantly decreasing latency.
+**Action:** Always consolidate multiple aggregate queries on the same key into a single `select()` with `scalar_subquery()` columns to prevent excessive database roundtrips.

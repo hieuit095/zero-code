@@ -225,37 +225,41 @@ class RunStore:
         """
         from sqlalchemy import func
 
-        run = await session.get(RunModel, run_id)
-        if run is None:
+        qa_fail_sub = select(func.count(EventLogModel.id)).where(
+            EventLogModel.run_id == run_id, EventLogModel.type == "qa:report"
+        ).scalar_subquery()
+
+        exec_sub = select(func.count(EventLogModel.id)).where(
+            EventLogModel.run_id == run_id, EventLogModel.type == "terminal:output"
+        ).scalar_subquery()
+
+        tasks_completed_sub = select(func.count(TaskModel.id)).where(
+            TaskModel.run_id == run_id, TaskModel.status == "completed"
+        ).scalar_subquery()
+
+        total_tasks_sub = select(func.count(TaskModel.id)).where(
+            TaskModel.run_id == run_id
+        ).scalar_subquery()
+
+        stmt = select(
+            RunModel,
+            qa_fail_sub.label("qa_fail_count"),
+            exec_sub.label("exec_count"),
+            tasks_completed_sub.label("completed_count"),
+            total_tasks_sub.label("total_tasks")
+        ).where(RunModel.id == run_id)
+
+        result = await session.execute(stmt)
+        row = result.first()
+
+        if row is None:
             return None
 
-        # QA failure count: events with type containing "qa:report"
-        qa_fail_result = await session.execute(
-            select(func.count(EventLogModel.id))
-            .where(EventLogModel.run_id == run_id, EventLogModel.type == "qa:report")
-        )
-        qa_failure_count = qa_fail_result.scalar() or 0
-
-        # Total commands executed: events with type "terminal:output"
-        exec_result = await session.execute(
-            select(func.count(EventLogModel.id))
-            .where(EventLogModel.run_id == run_id, EventLogModel.type == "terminal:output")
-        )
-        total_commands_executed = exec_result.scalar() or 0
-
-        # Tasks completed
-        tasks_result = await session.execute(
-            select(func.count(TaskModel.id))
-            .where(TaskModel.run_id == run_id, TaskModel.status == "completed")
-        )
-        tasks_completed = tasks_result.scalar() or 0
-
-        # Total tasks
-        total_tasks_result = await session.execute(
-            select(func.count(TaskModel.id))
-            .where(TaskModel.run_id == run_id)
-        )
-        total_tasks = total_tasks_result.scalar() or 0
+        run = row[0]
+        qa_failure_count = row[1] or 0
+        total_commands_executed = row[2] or 0
+        tasks_completed = row[3] or 0
+        total_tasks = row[4] or 0
 
         # Duration: difference between created_at and updated_at
         total_duration_ms = 0
