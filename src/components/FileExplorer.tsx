@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,7 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+const FileRow = memo(function FileRowInner({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,7 +120,23 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prevProps, nextProps) => {
+  // If it's a folder, ALWAYS re-render so it can pass down the new selectedId
+  // to its deeply nested file children.
+  if (prevProps.node.type === 'folder') return false;
+
+  const wasSelected = prevProps.selectedId === prevProps.node.id || prevProps.selectedId === prevProps.node.name;
+  const isSelectedNow = nextProps.selectedId === nextProps.node.id || nextProps.selectedId === nextProps.node.name;
+
+  // Re-render ONLY if this specific file's selection state changed
+  // OR if its core props changed (unlikely for stable nodes)
+  return (
+    wasSelected === isSelectedNow &&
+    prevProps.node === nextProps.node &&
+    prevProps.depth === nextProps.depth &&
+    prevProps.onSelect === nextProps.onSelect
+  );
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
@@ -156,6 +172,10 @@ export function FileExplorer() {
       });
     }
   };
+
+  const handleSelect = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   return (
     <div className="flex flex-col h-full">
@@ -209,7 +229,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleSelect}
             />
           ))
         )}
