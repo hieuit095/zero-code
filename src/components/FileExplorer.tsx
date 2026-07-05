@@ -23,7 +23,7 @@
 //   Wire it to open a filename prompt and send: ws.send({ type: "fs:create", path: fileName }).
 
 
-import { useState } from 'react';
+import { useState, memo, useCallback } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -66,7 +66,7 @@ function getFileColor(name: string): string {
   return 'text-slate-300';
 }
 
-function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
+const FileRow = memo(function FileRowComponent({ node, depth, selectedId, onSelect }: FileRowProps) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isSelected = selectedId === node.id || selectedId === node.name;
   const isFolder = node.type === 'folder';
@@ -120,13 +120,33 @@ function FileRow({ node, depth, selectedId, onSelect }: FileRowProps) {
       ))}
     </>
   );
-}
+}, (prev, next) => {
+  // ⚡ Bolt: React Performance Pattern - O(1) re-renders for recursive file tree.
+  // Branch nodes (folders) must always re-render to propagate new `selectedId`
+  // down to their children. Only memoize leaf nodes (files) based on specific state changes.
+  if (prev.node.type === 'folder') return false;
+
+  const wasSelected = prev.selectedId === prev.node.id || prev.selectedId === prev.node.name;
+  const isSelected = next.selectedId === next.node.id || next.selectedId === next.node.name;
+
+  return (
+    wasSelected === isSelected &&
+    prev.node === next.node &&
+    prev.depth === next.depth &&
+    prev.onSelect === next.onSelect
+  );
+});
 
 export function FileExplorer() {
   const { fileTree, activeTabId, fetchAndOpenFile } = useFileSystem();
   const { sendMessage } = useRunConnection();
   const workspaceId = useSettingsStore((s) => s.workspaceId);
   const setWorkspaceId = useSettingsStore((s) => s.setWorkspaceId);
+
+  // ⚡ Bolt: Memoized selection handler to prevent cascading re-renders in FileRow tree
+  const handleFileSelect = useCallback((id: string) => {
+    fetchAndOpenFile(id, workspaceId);
+  }, [fetchAndOpenFile, workspaceId]);
 
   const handleRefresh = () => {
     sendMessage({
@@ -209,7 +229,7 @@ export function FileExplorer() {
               node={node}
               depth={0}
               selectedId={activeTabId}
-              onSelect={(id, _name) => fetchAndOpenFile(id, workspaceId)}
+              onSelect={handleFileSelect}
             />
           ))
         )}
